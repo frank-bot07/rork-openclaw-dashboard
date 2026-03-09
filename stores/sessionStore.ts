@@ -12,9 +12,11 @@ interface SessionState {
   lastError: string | null;
 
   // Actions
+  restoreSession: (session: Session) => void;
   setConnecting: (url: string) => void;
   setConnected: (session: Session) => void;
   setReconnecting: (reason?: string) => void;
+  setOffline: (reason?: string) => void;
   setDisconnected: (error?: string) => void;
   setUnauthorized: (reason?: string) => void;
   clearSession: () => void;
@@ -26,20 +28,60 @@ export const useSessionStore = create<SessionState>((set) => ({
   session: null,
   lastError: null,
 
+  restoreSession: (session: Session) =>
+    set({
+      connectionState: session.connectionState ?? 'connected',
+      gatewayUrl: session.gatewayUrl,
+      session,
+      lastError: null,
+    }),
+
   setConnecting: (url: string) =>
     set({ connectionState: 'connecting', gatewayUrl: url, lastError: null }),
 
   setConnected: (session: Session) =>
-    set({ connectionState: 'connected', session, lastError: null }),
+    set({
+      connectionState: 'connected',
+      gatewayUrl: session.gatewayUrl,
+      session: { ...session, connectionState: 'connected' },
+      lastError: null,
+    }),
 
   setReconnecting: (reason?: string) =>
-    set({ connectionState: 'reconnecting', lastError: reason ?? null }),
+    set((state) => ({
+      connectionState: 'reconnecting',
+      gatewayUrl: state.gatewayUrl ?? state.session?.gatewayUrl ?? null,
+      session: state.session
+        ? { ...state.session, connectionState: 'reconnecting' }
+        : state.session,
+      lastError: reason ?? null,
+    })),
+
+  setOffline: (reason?: string) =>
+    set((state) => ({
+      connectionState: 'offline',
+      gatewayUrl: state.gatewayUrl ?? state.session?.gatewayUrl ?? null,
+      session: state.session
+        ? { ...state.session, connectionState: 'offline' }
+        : state.session,
+      lastError: reason ?? null,
+    })),
 
   setDisconnected: (error?: string) =>
-    set({ connectionState: 'disconnected', session: null, lastError: error ?? null }),
+    set({
+      connectionState: 'disconnected',
+      gatewayUrl: null,
+      session: null,
+      lastError: error ?? null,
+    }),
 
   setUnauthorized: (reason?: string) =>
-    set({ connectionState: 'unauthorized', session: null, lastError: reason ?? 'Unauthorized' }),
+    set((state) => ({
+      connectionState: 'unauthorized',
+      gatewayUrl: state.gatewayUrl ?? state.session?.gatewayUrl ?? null,
+      session: null,
+      lastError: reason ?? 'Unauthorized',
+    })),
 
   clearSession: () =>
     set({ connectionState: 'disconnected', gatewayUrl: null, session: null, lastError: null }),
