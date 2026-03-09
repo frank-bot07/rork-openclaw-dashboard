@@ -53,6 +53,7 @@ export function buildSessionFromOverview(
     operatorId: rawSession.operatorId ?? previousSession?.operatorId ?? null,
     operatorName: rawSession.operatorName ?? previousSession?.operatorName ?? null,
     connectionState: 'connected',
+    connectedAt: previousSession?.connectedAt ?? new Date().toISOString(),
     capabilities: {
       ...DEFAULT_GATEWAY_CAPABILITIES,
       ...overview.gateway.capabilities,
@@ -65,6 +66,8 @@ export function buildSessionFromOverview(
       rawSession.accessTokenExpiresAt ?? previousSession?.accessTokenExpiresAt ?? null,
     refreshTokenExpiresAt:
       rawSession.refreshTokenExpiresAt ?? previousSession?.refreshTokenExpiresAt ?? null,
+    gatewayName: overview.gateway.name ?? previousSession?.gatewayName ?? null,
+    gatewayVersion: overview.gateway.version ?? previousSession?.gatewayVersion ?? null,
     metadata: {
       ...previousSession?.metadata,
       ...metadata,

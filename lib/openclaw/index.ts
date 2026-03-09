@@ -3,7 +3,7 @@
  */
 export { OpenClawClient } from './client';
 export { openClawAuth } from './auth';
-export { OpenClawEventSource } from './events';
+export { OpenClawEventsAdapter, createOpenClawEventsAdapter } from './events';
 export { queryKeys } from './queryKeys';
 export {
   buildSessionFromOverview,

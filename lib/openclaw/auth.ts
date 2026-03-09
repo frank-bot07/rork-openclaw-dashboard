@@ -39,8 +39,11 @@ export interface SessionBootstrapInput {
   operatorName?: string | null;
   connectionState?: ConnectionState;
   capabilities?: Partial<GatewayCapabilities>;
+  connectedAt?: string | null;
   issuedAt?: string | null;
   lastValidatedAt?: string | null;
+  gatewayName?: string | null;
+  gatewayVersion?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -85,18 +88,29 @@ export const openClawAuth = {
   },
 
   async saveSession(session: Session) {
+    const normalizedSession: Session = {
+      ...session,
+      connectedAt: session.connectedAt ?? session.lastValidatedAt ?? session.issuedAt ?? new Date().toISOString(),
+      gatewayName:
+        session.gatewayName ??
+        (typeof session.metadata?.gatewayName === 'string' ? session.metadata.gatewayName : null),
+      gatewayVersion:
+        session.gatewayVersion ??
+        (typeof session.metadata?.gatewayVersion === 'string' ? session.metadata.gatewayVersion : null),
+    };
+
     await Promise.all([
       AsyncStorage.setItem(
         SESSION_METADATA_KEY,
         JSON.stringify({
-          ...session,
+          ...normalizedSession,
           capabilities: {
             ...DEFAULT_GATEWAY_CAPABILITIES,
-            ...session.capabilities,
+            ...normalizedSession.capabilities,
           },
         })
       ),
-      this.saveGatewayUrl(session.gatewayUrl),
+      this.saveGatewayUrl(normalizedSession.gatewayUrl),
     ]);
   },
 
@@ -132,8 +146,15 @@ export const openClawAuth = {
           ...DEFAULT_GATEWAY_CAPABILITIES,
           ...parsed.capabilities,
         },
+        connectedAt: parsed.connectedAt ?? parsed.lastValidatedAt ?? parsed.issuedAt ?? null,
         accessTokenExpiresAt: tokens.accessTokenExpiresAt ?? parsed.accessTokenExpiresAt ?? null,
         refreshTokenExpiresAt: tokens.refreshTokenExpiresAt ?? parsed.refreshTokenExpiresAt ?? null,
+        gatewayName:
+          parsed.gatewayName ??
+          (typeof parsed.metadata?.gatewayName === 'string' ? parsed.metadata.gatewayName : null),
+        gatewayVersion:
+          parsed.gatewayVersion ??
+          (typeof parsed.metadata?.gatewayVersion === 'string' ? parsed.metadata.gatewayVersion : null),
       };
     } catch {
       await AsyncStorage.removeItem(SESSION_METADATA_KEY);
@@ -146,6 +167,10 @@ export const openClawAuth = {
       this.clearTokens(),
       AsyncStorage.removeItem(SESSION_METADATA_KEY),
     ]);
+  },
+
+  async logout() {
+    await this.clearSession();
   },
 
   async bootstrapSession(input: SessionBootstrapInput): Promise<Session | null> {
@@ -164,8 +189,11 @@ export const openClawAuth = {
         ...DEFAULT_GATEWAY_CAPABILITIES,
         ...input.capabilities,
       },
+      connectedAt: input.connectedAt ?? input.lastValidatedAt ?? input.issuedAt ?? new Date().toISOString(),
       accessTokenExpiresAt: tokens.accessTokenExpiresAt ?? null,
       refreshTokenExpiresAt: tokens.refreshTokenExpiresAt ?? null,
+      gatewayName: input.gatewayName ?? null,
+      gatewayVersion: input.gatewayVersion ?? null,
       metadata: input.metadata,
       lastValidatedAt: input.lastValidatedAt ?? null,
       issuedAt: input.issuedAt ?? null,

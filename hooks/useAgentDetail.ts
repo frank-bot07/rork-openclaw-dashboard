@@ -1,7 +1,7 @@
 /**
  * Hook: fetch detailed agent info (status, runs, allowed actions).
  */
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
 import { OpenClawClient } from '@/lib/openclaw/client';
 import { mapAgentDetail } from '@/lib/openclaw/mappers';
@@ -20,5 +20,36 @@ export function useAgentDetail(client: OpenClawClient | null, agentId: string | 
     enabled: !!client && !!agentId && connectionState === 'connected',
     staleTime: 10_000,
     retry: 2,
+  });
+}
+
+export function useRestartAgent(client: OpenClawClient | null) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (agentId: string) => {
+      if (!client) throw new Error('No client');
+      return client.restartAgent(agentId);
+    },
+    onSuccess: (_data, agentId) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.overview });
+    },
+  });
+}
+
+export function usePingAgent(client: OpenClawClient | null) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (agentId: string) => {
+      if (!client) throw new Error('No client');
+      return client.pingAgent(agentId);
+    },
+    onSuccess: (_data, agentId) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.overview });
+    },
   });
 }

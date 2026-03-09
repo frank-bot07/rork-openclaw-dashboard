@@ -14,6 +14,7 @@ const AGENT_ACCENT_COLORS = [
 const STATUS_RING_COLORS: Record<string, string> = {
   online: Colors.success,
   busy: Colors.warning,
+  degraded: Colors.warning,
   offline: Colors.textMuted,
 };
 

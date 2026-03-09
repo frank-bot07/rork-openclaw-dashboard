@@ -63,6 +63,7 @@ export interface RunSummary {
   auditId?: string | null;
   delegatedAgentIds?: string[];
   delegatedAgentNames?: string[];
+  canRetry?: boolean;
   metadata?: Record<string, unknown>;
 }
 
@@ -166,8 +167,11 @@ export interface Session {
   capabilities: GatewayCapabilities;
   issuedAt?: string | null;
   lastValidatedAt?: string | null;
+  connectedAt?: string | null;
   accessTokenExpiresAt?: string | null;
   refreshTokenExpiresAt?: string | null;
+  gatewayName?: string | null;
+  gatewayVersion?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -224,14 +228,17 @@ export interface ConversationViewModel {
 export interface AgentDetailViewModel {
   agent: Agent;
   recentRuns: RunSummary[];
+  allowedActions: string[];
   incidents: Incident[];
 }
 
 export interface OverviewViewModel {
   gateway: GatewayStatus;
+  coordinatorId: string | null;
   coordinator: Agent | null;
   agents: Agent[];
-  incidents: Incident[];
+  recentRuns: RunSummary[];
+  openIncidents: Incident[];
   activity: ActivityEntry[];
   capabilities: GatewayCapabilities;
   session?: Partial<Session> | null;
@@ -269,6 +276,7 @@ export interface GatewayRunResponse {
   auditId?: string | null;
   delegatedAgentIds?: string[];
   delegatedAgentNames?: string[];
+  canRetry?: boolean;
   metadata?: Record<string, unknown>;
 }
 
@@ -322,6 +330,7 @@ export interface GatewayAgentResponse {
   model?: string;
   provider?: string;
   description?: string;
+  agentDir?: string;
   lastActivityAt?: string | null;
   role?: 'coordinator' | 'specialist';
   specialistType?: string | null;
@@ -387,6 +396,7 @@ export interface GatewayOverviewResponse {
   };
   coordinator?: GatewayAgentResponse | null;
   agents: GatewayAgentResponse[];
+  recentRuns?: GatewayRunResponse[];
   incidents?: GatewayIncidentResponse[];
   activity?: GatewayActivityResponse[];
 }

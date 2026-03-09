@@ -399,15 +399,35 @@ function resolveConversationMessagesPath(input: Pick<SendMessageInput, 'conversa
   throw new OpenClawClientError('A conversationId or agentId is required');
 }
 
-function serializeFilters<T extends Record<string, unknown> | undefined>(filters: T) {
+function serializeFilters<T extends object>(filters?: T) {
   if (!filters) {
     return undefined;
   }
 
-  return Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== undefined && value !== null));
+  const serialized: Record<string, QueryValue> = {};
+
+  for (const [key, value] of Object.entries(filters)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      serialized[key] = value.filter(
+        (entry): entry is string | number | boolean =>
+          typeof entry === 'string' || typeof entry === 'number' || typeof entry === 'boolean'
+      );
+      continue;
+    }
+
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      serialized[key] = value;
+    }
+  }
+
+  return serialized;
 }
 
-function omit<T extends Record<string, unknown>, K extends keyof T>(value: T, key: K): Omit<T, K> {
+function omit<T extends object, K extends keyof T>(value: T, key: K): Omit<T, K> {
   const nextValue = { ...value };
   delete nextValue[key];
   return nextValue;
@@ -419,7 +439,7 @@ function sleep(delayMs: number) {
   });
 }
 
-function mergeAbortSignals(primary: AbortSignal, secondary?: AbortSignal) {
+function mergeAbortSignals(primary: AbortSignal, secondary?: AbortSignal | null) {
   if (!secondary) {
     return primary;
   }

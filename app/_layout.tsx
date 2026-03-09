@@ -88,7 +88,6 @@ function RootLayoutNav() {
         headerShadowVisible: false,
         headerTitleStyle: {
           fontWeight: '700' as const,
-          letterSpacing: -0.3,
         },
       }}
     >

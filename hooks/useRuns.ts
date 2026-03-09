@@ -6,11 +6,9 @@ import { queryKeys } from '@/lib/openclaw/queryKeys';
 import { OpenClawClient } from '@/lib/openclaw/client';
 import { mapRunSummary } from '@/lib/openclaw/mappers';
 import { useSessionStore } from '@/stores/sessionStore';
+import type { RunsQuery } from '@/types/openclaw';
 
-interface RunFilters {
-  status?: string;
-  agentId?: string;
-}
+type RunFilters = Pick<RunsQuery, 'status' | 'agentId'>;
 
 export function useRuns(client: OpenClawClient | null, filters?: RunFilters) {
   const connectionState = useSessionStore((s) => s.connectionState);

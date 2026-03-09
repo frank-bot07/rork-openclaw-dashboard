@@ -4,9 +4,8 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
 import { OpenClawClient } from '@/lib/openclaw/client';
-import { mapConversation, mapConversationMessage } from '@/lib/openclaw/mappers';
+import { mapConversation } from '@/lib/openclaw/mappers';
 import { useSessionStore } from '@/stores/sessionStore';
-import type { ChatMessage, ConversationViewModel } from '@/types/openclaw';
 
 export function useConversation(client: OpenClawClient | null, agentId: string | undefined) {
   const connectionState = useSessionStore((s) => s.connectionState);
@@ -15,7 +14,7 @@ export function useConversation(client: OpenClawClient | null, agentId: string |
     queryKey: queryKeys.conversations.byAgent(agentId ?? ''),
     queryFn: async () => {
       if (!client || !agentId) throw new Error('No client or agent id');
-      const raw = await client.getConversation(agentId);
+      const raw = await client.getConversation({ agentId });
       return mapConversation(raw);
     },
     enabled: !!client && !!agentId && connectionState === 'connected',
