@@ -3,21 +3,20 @@ import { View, Text, ScrollView, StyleSheet, Animated, RefreshControl, Pressable
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
-import { ChevronRight, Activity, Wifi, WifiOff, Bot, MessageSquare, ArrowRight, Zap } from 'lucide-react-native';
+import { ChevronRight, Activity, Wifi, WifiOff, Bot, MessageSquare, ArrowRight } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
 import { useOpenClaw } from '@/providers/OpenClawProvider';
+import { useOverview } from '@/hooks/useOverview';
 import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
 import StatusDot from '@/components/StatusDot';
 import FloatingChatButton from '@/components/FloatingChatButton';
-import { QuickAction } from '@/types/openclaw';
+import { useSessionStore } from '@/stores/sessionStore';
 
 export default function DashboardScreen() {
-  const {
-    agents, gatewayStatus, heartbeats, activeProfile,
-    isRefreshing, refreshData,
-    activityFeed, quickActions, executeQuickAction,
-  } = useOpenClaw();
+  const { client, agents, heartbeats, isRefreshing, refreshData } = useOpenClaw();
+  const overview = useOverview(client);
+  const gatewayUrl = useSessionStore((state) => state.gatewayUrl);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -30,20 +29,23 @@ export default function DashboardScreen() {
     ]).start();
   }, [fadeAnim, slideAnim]);
 
+  const gatewayStatus = overview.data?.gateway;
   const onlineAgents = useMemo(() => agents.filter(a => a.status !== 'offline'), [agents]);
-  const primaryAgent = useMemo(() => agents.find(a => a.status === 'online') ?? agents[0], [agents]);
+  const primaryAgent = useMemo(
+    () =>
+      overview.data?.coordinator ??
+      agents.find((agent) => agent.isCoordinator || agent.role === 'coordinator') ??
+      agents.find((agent) => agent.status === 'online') ??
+      agents[0],
+    [agents, overview.data?.coordinator]
+  );
   const healthyHeartbeats = heartbeats.filter(h => h.status === 'healthy').length;
+  const isOverviewLoading = overview.isLoading && !overview.data;
 
   const handleAgentPress = useCallback((agentId: string) => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     router.push(`/agent/${agentId}`);
   }, [router]);
-
-  const handleQuickAction = useCallback((action: QuickAction) => {
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    executeQuickAction(action);
-    router.push(`/agent/${action.agentId}`);
-  }, [executeQuickAction, router]);
 
   const avgUptime = useMemo(() => {
     if (heartbeats.length === 0) return 0;
@@ -69,21 +71,41 @@ export default function DashboardScreen() {
           <View style={styles.topBar}>
             <View>
               <Text style={styles.greeting}>Mission Control</Text>
-              {activeProfile && (
-                <Text style={styles.serverLabel}>{activeProfile.address}</Text>
+              {gatewayUrl && (
+                <Text style={styles.serverLabel}>{gatewayUrl}</Text>
               )}
             </View>
             <View style={styles.statusChip}>
-              {gatewayStatus.online ? (
+              {isOverviewLoading ? (
+                <Wifi size={13} color={Colors.warning} />
+              ) : gatewayStatus?.online ? (
                 <Wifi size={13} color={Colors.success} />
               ) : (
                 <WifiOff size={13} color={Colors.error} />
               )}
-              <Text style={[styles.statusChipText, { color: gatewayStatus.online ? Colors.success : Colors.error }]}>
-                {gatewayStatus.online ? 'Live' : 'Offline'}
+              <Text
+                style={[
+                  styles.statusChipText,
+                  {
+                    color: isOverviewLoading
+                      ? Colors.warning
+                      : gatewayStatus?.online
+                        ? Colors.success
+                        : Colors.error,
+                  },
+                ]}
+              >
+                {isOverviewLoading ? 'Connecting...' : gatewayStatus?.online ? 'Live' : 'Offline'}
               </Text>
             </View>
           </View>
+
+          {isOverviewLoading && (
+            <View style={styles.connectingCard}>
+              <Text style={styles.connectingTitle}>Connecting...</Text>
+              <Text style={styles.connectingText}>Fetching gateway health and coordinator state.</Text>
+            </View>
+          )}
 
           {primaryAgent && (
             <Pressable
@@ -139,7 +161,9 @@ export default function DashboardScreen() {
                 colors={[Colors.primaryGlow, 'transparent']}
                 style={[StyleSheet.absoluteFill, { borderRadius: 16 }]}
               />
-              <Text style={[styles.statNumber, { color: Colors.primary }]}>{agents.length}</Text>
+              <Text style={[styles.statNumber, { color: Colors.primary }]}>
+                {gatewayStatus?.totalAgents ?? agents.length}
+              </Text>
               <Text style={styles.statLabel}>Agents</Text>
             </View>
             <View style={styles.statCard}>
@@ -147,7 +171,9 @@ export default function DashboardScreen() {
                 colors={[Colors.successGlow, 'transparent']}
                 style={[StyleSheet.absoluteFill, { borderRadius: 16 }]}
               />
-              <Text style={[styles.statNumber, { color: Colors.success }]}>{onlineAgents.length}</Text>
+              <Text style={[styles.statNumber, { color: Colors.success }]}>
+                {gatewayStatus?.onlineAgents ?? onlineAgents.length}
+              </Text>
               <Text style={styles.statLabel}>Online</Text>
             </View>
             <View style={styles.statCard}>
@@ -163,32 +189,12 @@ export default function DashboardScreen() {
                 colors={[Colors.cyberGlow, 'transparent']}
                 style={[StyleSheet.absoluteFill, { borderRadius: 16 }]}
               />
-              <Text style={[styles.statNumber, { color: Colors.cyber }]}>{gatewayStatus.activeChannels}</Text>
+              <Text style={[styles.statNumber, { color: Colors.cyber }]}>
+                {gatewayStatus?.activeChannels ?? '--'}
+              </Text>
               <Text style={styles.statLabel}>Channels</Text>
             </View>
           </View>
-
-          {quickActions.length > 0 && (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>One-Tap Actions</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickActionsScroll}>
-                {quickActions.slice(0, 6).map((action) => (
-                  <Pressable
-                    key={action.id}
-                    style={({ pressed }) => [styles.quickActionCard, pressed && { transform: [{ scale: 0.95 }], opacity: 0.85 }]}
-                    onPress={() => handleQuickAction(action)}
-                    testID={`quick-action-${action.id}`}
-                  >
-                    <View style={[styles.quickActionIcon, { backgroundColor: action.glow }]}>
-                      <Zap size={16} color={action.color} />
-                    </View>
-                    <Text style={styles.quickActionLabel} numberOfLines={1}>{action.label}</Text>
-                    <Text style={styles.quickActionDesc} numberOfLines={1}>{action.description}</Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-            </View>
-          )}
 
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
@@ -258,7 +264,7 @@ export default function DashboardScreen() {
                 <View style={styles.healthStat}>
                   <Bot size={16} color={Colors.primary} />
                   <View>
-                    <Text style={styles.healthValue}>{gatewayStatus.activeChannels}</Text>
+                    <Text style={styles.healthValue}>{gatewayStatus?.activeChannels ?? '--'}</Text>
                     <Text style={styles.healthLabel}>Channels</Text>
                   </View>
                 </View>
@@ -266,41 +272,16 @@ export default function DashboardScreen() {
                 <View style={styles.healthStat}>
                   <MessageSquare size={16} color={Colors.accent} />
                   <View>
-                    <Text style={styles.healthValue}>{gatewayStatus.pendingJobs}</Text>
+                    <Text style={styles.healthValue}>{gatewayStatus?.pendingJobs ?? '--'}</Text>
                     <Text style={styles.healthLabel}>Jobs</Text>
                   </View>
                 </View>
               </View>
               <View style={styles.uptimeRow}>
-                <Text style={styles.uptimeLabel}>Uptime: {gatewayStatus.uptime}</Text>
-                <Text style={styles.uptimeVersion}>v{gatewayStatus.version}</Text>
+                <Text style={styles.uptimeLabel}>Uptime: {gatewayStatus?.uptime ?? '--'}</Text>
+                <Text style={styles.uptimeVersion}>{gatewayStatus ? `v${gatewayStatus.version}` : 'v--'}</Text>
               </View>
             </View>
-          </View>
-
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Recent Activity</Text>
-            {activityFeed.slice(0, 5).map((activity) => (
-              <Pressable
-                key={activity.id}
-                style={styles.activityRow}
-                onPress={() => handleAgentPress(activity.agentId)}
-              >
-                <View style={styles.activityLeft}>
-                  <View style={[styles.activityDot, {
-                    backgroundColor: activity.type === 'alert' ? Colors.warning
-                      : activity.type === 'message' ? Colors.primary
-                      : activity.type === 'task' ? Colors.accent
-                      : Colors.textMuted,
-                  }]} />
-                  <View style={styles.activityContent}>
-                    <Text style={styles.activityTitle}>{activity.title}</Text>
-                    <Text style={styles.activityDetail} numberOfLines={1}>{activity.agentName} · {activity.detail}</Text>
-                  </View>
-                </View>
-                <ChevronRight size={14} color={Colors.textDim} />
-              </Pressable>
-            ))}
           </View>
 
           <View style={{ height: 120 }} />
@@ -431,6 +412,25 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '500' as const,
   },
+  connectingCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: Colors.cardBorder,
+    padding: 18,
+    marginBottom: 20,
+  },
+  connectingTitle: {
+    color: Colors.text,
+    fontSize: 16,
+    fontWeight: '700' as const,
+    marginBottom: 6,
+  },
+  connectingText: {
+    color: Colors.textMuted,
+    fontSize: 13,
+    lineHeight: 18,
+  },
   statsRow: {
     flexDirection: 'row',
     gap: 8,
@@ -483,37 +483,6 @@ const styles = StyleSheet.create({
     color: Colors.primary,
     fontSize: 14,
     fontWeight: '600' as const,
-  },
-  quickActionsScroll: {
-    gap: 10,
-    paddingRight: 20,
-  },
-  quickActionCard: {
-    width: 140,
-    backgroundColor: Colors.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    padding: 14,
-  },
-  quickActionIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-  },
-  quickActionLabel: {
-    color: Colors.text,
-    fontSize: 14,
-    fontWeight: '700' as const,
-    marginBottom: 3,
-  },
-  quickActionDesc: {
-    color: Colors.textMuted,
-    fontSize: 11,
-    lineHeight: 15,
   },
   agentCard: {
     backgroundColor: Colors.surface,
@@ -621,38 +590,5 @@ const styles = StyleSheet.create({
     color: Colors.textDim,
     fontSize: 12,
     fontWeight: '600' as const,
-  },
-  activityRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.cardBorder,
-  },
-  activityLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    gap: 10,
-  },
-  activityDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-  },
-  activityContent: {
-    flex: 1,
-  },
-  activityTitle: {
-    color: Colors.text,
-    fontSize: 13,
-    fontWeight: '600' as const,
-    marginBottom: 2,
-  },
-  activityDetail: {
-    color: Colors.textMuted,
-    fontSize: 12,
-    lineHeight: 16,
   },
 });

@@ -1,22 +1,20 @@
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import React, { useMemo, useCallback, useRef, useEffect } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TextInput, Modal, Pressable,
-  Alert, RefreshControl, Animated,
+  View, Text, ScrollView, StyleSheet, TextInput, Pressable, RefreshControl, Animated,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Search, ChevronRight, Plus, X, Cpu } from 'lucide-react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import { Search, ChevronRight, X } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
 import { useOpenClaw } from '@/providers/OpenClawProvider';
 import { Agent, AgentStatus } from '@/types/openclaw';
 import FloatingChatButton from '@/components/FloatingChatButton';
-import { mockModels } from '@/mocks/models';
 import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
 import StatusDot from '@/components/StatusDot';
 import PressableCard from '@/components/PressableCard';
 import ChannelIcon from '@/components/ChannelIcon';
+import { useUIStore } from '@/stores/uiStore';
 
 function AnimatedAgentCard({ agent, index, onPress }: { agent: Agent; index: number; onPress: () => void }) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -92,13 +90,14 @@ function AnimatedAgentCard({ agent, index, onPress }: { agent: Agent; index: num
 }
 
 export default function AgentsScreen() {
-  const { agents, addAgent, isRefreshing, refreshData } = useOpenClaw();
+  const { client, agents, isRefreshing, refreshData } = useOpenClaw();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<AgentStatus | 'all'>('all');
-  const [showCreateModal, setShowCreateModal] = useState(false);
+  const search = useUIStore((state) => state.agentSearchQuery);
+  const setSearch = useUIStore((state) => state.setAgentSearch);
+  const statusFilter = useUIStore((state) => state.agentStatusFilter);
+  const setStatusFilter = useUIStore((state) => state.setAgentStatusFilter);
+  const hasClient = !!client;
 
   const filteredAgents = useMemo(() => {
     return agents.filter(a => {
@@ -126,22 +125,6 @@ export default function AgentsScreen() {
       <View style={[styles.headerArea, { paddingTop: insets.top + 16 }]}>
         <View style={styles.titleRow}>
           <Text style={styles.pageTitle}>Agents</Text>
-          <Pressable
-            style={styles.createBtn}
-            onPress={() => {
-              setShowCreateModal(true);
-              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-            }}
-          >
-            <LinearGradient
-              colors={[Colors.primary, Colors.accent]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.createBtnGradient}
-            >
-              <Plus size={20} color="#000" strokeWidth={3} />
-            </LinearGradient>
-          </Pressable>
         </View>
 
         <View style={styles.searchBar}>
@@ -215,160 +198,16 @@ export default function AgentsScreen() {
           <View style={styles.emptyState}>
             <Search size={40} color={Colors.textDim} />
             <Text style={styles.emptyText}>No agents found</Text>
-            <Text style={styles.emptySubtext}>Try a different search or filter</Text>
+            <Text style={styles.emptySubtext}>
+              {hasClient ? 'Try a different search or filter' : 'Connect to a gateway to load agents'}
+            </Text>
           </View>
         )}
         <View style={{ height: 110 }} />
       </ScrollView>
 
-      <CreateAgentModal
-        visible={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        onAdd={addAgent}
-      />
-
       <FloatingChatButton agents={agents} />
     </View>
-  );
-}
-
-function CreateAgentModal({ visible, onClose, onAdd }: {
-  visible: boolean;
-  onClose: () => void;
-  onAdd: (agent: Agent) => void;
-}) {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [selectedModelId, setSelectedModelId] = useState(mockModels[0].id);
-  const [systemPrompt, setSystemPrompt] = useState('');
-  const [showModels, setShowModels] = useState(false);
-
-  const selectedModel = useMemo(() => {
-    return mockModels.find(m => m.id === selectedModelId) ?? mockModels[0];
-  }, [selectedModelId]);
-
-  const handleCreate = useCallback(() => {
-    if (!name.trim()) {
-      Alert.alert('Missing Name', 'Please provide an agent name.');
-      return;
-    }
-    const agent: Agent = {
-      id: `agent-${Date.now()}`,
-      name: name.trim(),
-      status: 'offline',
-      model: selectedModel.id,
-      provider: selectedModel.provider,
-      channels: [],
-      lastActivity: 'Just created',
-      description: description.trim() || `${name.trim()} agent`,
-      systemPrompt: systemPrompt.trim() || `You are ${name.trim()}, a helpful AI assistant.`,
-      agentDir: `~/.openclaw/agents/${name.trim().toLowerCase().replace(/\s+/g, '-')}`,
-    };
-    onAdd(agent);
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setName('');
-    setDescription('');
-    setSelectedModelId(mockModels[0].id);
-    setSystemPrompt('');
-    setShowModels(false);
-    onClose();
-  }, [name, description, selectedModel, systemPrompt, onAdd, onClose]);
-
-  return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={onClose}
-    >
-      <View style={styles.modalContainer}>
-        <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>Create Agent</Text>
-          <Pressable style={styles.modalCloseBtn} onPress={onClose} hitSlop={12}>
-            <X size={20} color={Colors.textSecondary} />
-          </Pressable>
-        </View>
-
-        <ScrollView style={styles.modalBody} contentContainerStyle={styles.modalBodyContent} showsVerticalScrollIndicator={false}>
-          <Text style={styles.formLabel}>Name</Text>
-          <TextInput
-            style={styles.formInput}
-            placeholder="e.g. Navigator"
-            placeholderTextColor={Colors.textMuted}
-            value={name}
-            onChangeText={setName}
-          />
-
-          <Text style={styles.formLabel}>Description</Text>
-          <TextInput
-            style={styles.formInput}
-            placeholder="What does this agent do?"
-            placeholderTextColor={Colors.textMuted}
-            value={description}
-            onChangeText={setDescription}
-          />
-
-          <Text style={styles.formLabel}>AI Model</Text>
-          <Pressable
-            style={styles.modelPickerBtn}
-            onPress={() => setShowModels(!showModels)}
-          >
-            <View style={styles.modelPickerInfo}>
-              <Cpu size={16} color={Colors.primary} />
-              <View>
-                <Text style={styles.modelPickerName}>{selectedModel.name}</Text>
-                <Text style={styles.modelPickerProvider}>{selectedModel.provider}</Text>
-              </View>
-            </View>
-            <Text style={styles.modelPickerChevron}>{showModels ? '▲' : '▼'}</Text>
-          </Pressable>
-
-          {showModels && (
-            <View style={styles.modelListContainer}>
-              {mockModels.map((model) => (
-                <Pressable
-                  key={model.id}
-                  style={[
-                    styles.modelOption,
-                    selectedModelId === model.id && styles.modelOptionActive,
-                  ]}
-                  onPress={() => {
-                    setSelectedModelId(model.id);
-                    setShowModels(false);
-                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  }}
-                >
-                  <Text style={styles.modelOptionName}>{model.name}</Text>
-                  <Text style={styles.modelOptionDesc}>{model.provider} · {(model.contextWindow / 1000).toFixed(0)}K context</Text>
-                </Pressable>
-              ))}
-            </View>
-          )}
-
-          <Text style={styles.formLabel}>System Prompt</Text>
-          <TextInput
-            style={[styles.formInput, styles.formInputMultiline]}
-            placeholder="Instructions for your agent..."
-            placeholderTextColor={Colors.textMuted}
-            value={systemPrompt}
-            onChangeText={setSystemPrompt}
-            multiline
-            textAlignVertical="top"
-          />
-
-          <Pressable style={styles.modalSaveBtn} onPress={handleCreate}>
-            <LinearGradient
-              colors={[Colors.primary, Colors.accent]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.modalSaveBtnGradient}
-            >
-              <Text style={styles.modalSaveBtnText}>Create Agent</Text>
-            </LinearGradient>
-          </Pressable>
-        </ScrollView>
-      </View>
-    </Modal>
   );
 }
 
@@ -408,19 +247,6 @@ const styles = StyleSheet.create({
     height: 48,
     color: Colors.text,
     fontSize: 16,
-  },
-  createBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
-  createBtnGradient: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   filterRow: {
     maxHeight: 56,
@@ -589,130 +415,5 @@ const styles = StyleSheet.create({
   emptySubtext: {
     color: Colors.textMuted,
     fontSize: 14,
-  },
-  modalContainer: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.cardBorder,
-  },
-  modalTitle: {
-    color: Colors.text,
-    fontSize: 22,
-    fontWeight: '700' as const,
-    letterSpacing: -0.4,
-  },
-  modalCloseBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: Colors.surfaceLight,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modalBody: {
-    flex: 1,
-  },
-  modalBodyContent: {
-    padding: 20,
-    paddingBottom: 40,
-  },
-  formLabel: {
-    color: Colors.textSecondary,
-    fontSize: 14,
-    fontWeight: '600' as const,
-    marginBottom: 8,
-    marginTop: 20,
-  },
-  formInput: {
-    backgroundColor: Colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    color: Colors.text,
-    fontSize: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  formInputMultiline: {
-    minHeight: 120,
-    textAlignVertical: 'top' as const,
-  },
-  modelPickerBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: Colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    padding: 14,
-  },
-  modelPickerInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  modelPickerName: {
-    color: Colors.text,
-    fontSize: 15,
-    fontWeight: '600' as const,
-  },
-  modelPickerProvider: {
-    color: Colors.textSecondary,
-    fontSize: 13,
-    marginTop: 2,
-  },
-  modelPickerChevron: {
-    color: Colors.textMuted,
-    fontSize: 14,
-  },
-  modelListContainer: {
-    marginTop: 8,
-    gap: 6,
-  },
-  modelOption: {
-    backgroundColor: Colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    padding: 14,
-  },
-  modelOptionActive: {
-    borderColor: Colors.primary,
-    backgroundColor: Colors.primaryGlow,
-  },
-  modelOptionName: {
-    color: Colors.text,
-    fontSize: 15,
-    fontWeight: '600' as const,
-  },
-  modelOptionDesc: {
-    color: Colors.textSecondary,
-    fontSize: 13,
-    marginTop: 3,
-  },
-  modalSaveBtn: {
-    borderRadius: 16,
-    overflow: 'hidden',
-    marginTop: 32,
-  },
-  modalSaveBtnGradient: {
-    paddingVertical: 18,
-    alignItems: 'center',
-    borderRadius: 16,
-  },
-  modalSaveBtnText: {
-    color: '#000',
-    fontSize: 17,
-    fontWeight: '800' as const,
   },
 });
