@@ -36,6 +36,7 @@ import { useSessionStore } from '@/stores/sessionStore';
 import type { Agent, ChatMessage, ConversationViewModel, EventPayload } from '@/types/openclaw';
 
 const EVENT_POLL_INTERVAL_MS = 3_000;
+const MESSAGE_SEND_RATE_LIMIT_MS = 500;
 
 export default function AgentDetailScreen() {
   const params = useLocalSearchParams<{ id?: string | string[] }>();
@@ -49,6 +50,7 @@ export default function AgentDetailScreen() {
   const conversationQuery = useConversation(client, agentId);
   const sendMessageMutation = useSendMessage(client);
   const cursorRef = useRef<string | undefined>(undefined);
+  const lastMessageSentAtRef = useRef(0);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [lastSubmittedAt, setLastSubmittedAt] = useState<string | null>(null);
   const [usingRefetchFallback, setUsingRefetchFallback] = useState(false);
@@ -64,7 +66,7 @@ export default function AgentDetailScreen() {
   }, [conversationQuery.data?.nextCursor]);
 
   const updateConversationCache = useCallback(
-    (updater: (current: ConversationViewModel | undefined) => ConversationViewModel) => {
+    (updater: (current: ConversationViewModel) => ConversationViewModel) => {
       if (!agentId) {
         return;
       }
@@ -171,22 +173,11 @@ export default function AgentDetailScreen() {
       return;
     }
 
-    let intervalId: ReturnType<typeof setInterval> | null = null;
     let subscriptionClosed = false;
-    const startRefetchFallback = () => {
-      if (intervalId) {
-        return;
-      }
-
-      setUsingRefetchFallback(true);
-      intervalId = setInterval(() => {
-        void conversationQuery.refetch();
-      }, EVENT_POLL_INTERVAL_MS);
-    };
 
     const adapter = createOpenClawEventsAdapter({
       baseUrl: gatewayUrl,
-      getAuthToken: () => openClawAuth.getAccessToken(),
+      getAuthToken: () => openClawAuth.getValidAccessToken(),
       pollIntervalMs: EVENT_POLL_INTERVAL_MS,
       transport: 'auto',
     });
@@ -201,16 +192,19 @@ export default function AgentDetailScreen() {
           return;
         }
 
-        setUsingRefetchFallback(false);
         handleRealtimeEvent(event);
       },
-      onError: () => {
+      onError: (error) => {
         if (subscriptionClosed) {
           return;
         }
 
-        subscription.close();
-        startRefetchFallback();
+        console.error('[AgentEvents] Subscription error.', error);
+      },
+      onFallbackStateChange: (isUsingPollingFallback) => {
+        if (!subscriptionClosed) {
+          setUsingRefetchFallback(isUsingPollingFallback);
+        }
       },
     });
 
@@ -218,10 +212,6 @@ export default function AgentDetailScreen() {
       subscriptionClosed = true;
       subscription.close();
       setUsingRefetchFallback(false);
-
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
     };
   }, [
     agentId,
@@ -389,9 +379,17 @@ export default function AgentDetailScreen() {
         onSend={(content) => {
           const trimmed = content.trim();
           if (!trimmed) {
-            return;
+            return false;
           }
 
+          const now = Date.now();
+          if (now - lastMessageSentAtRef.current < MESSAGE_SEND_RATE_LIMIT_MS) {
+            console.warn('[Conversation] Message send throttled.');
+            void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+            return false;
+          }
+
+          lastMessageSentAtRef.current = now;
           setLastSubmittedAt(new Date().toISOString());
           void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
@@ -407,6 +405,8 @@ export default function AgentDetailScreen() {
               },
             }
           );
+
+          return true;
         }}
         isSending={sendMessageMutation.isPending}
         isWaitingForReply={showTypingIndicator}
@@ -434,7 +434,7 @@ function ChatView({
   isConversationLoading: boolean;
   conversationError: string | null;
   onRetryConversation: () => void;
-  onSend: (content: string) => void;
+  onSend: (content: string) => boolean;
   isSending: boolean;
   isWaitingForReply: boolean;
   usingRefetchFallback: boolean;
@@ -453,8 +453,9 @@ function ChatView({
         return;
       }
 
-      setInput('');
-      onSend(trimmed);
+      if (onSend(trimmed)) {
+        setInput('');
+      }
     },
     [isSending, onSend]
   );

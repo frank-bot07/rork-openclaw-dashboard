@@ -10,7 +10,7 @@ export const queryKeys = {
 
   agents: {
     all: ['agents'] as const,
-    list: (filters?: { status?: string; search?: string }) =>
+    list: (filters?: { status?: string | string[]; search?: string }) =>
       ['agents', 'list', filters] as const,
     detail: (id: string) => ['agents', 'detail', id] as const,
   },
@@ -24,14 +24,14 @@ export const queryKeys = {
 
   runs: {
     all: ['runs'] as const,
-    list: (filters?: { status?: string; agentId?: string }) =>
+    list: (filters?: { status?: string | string[]; agentId?: string }) =>
       ['runs', 'list', filters] as const,
     detail: (id: string) => ['runs', 'detail', id] as const,
   },
 
   incidents: {
     all: ['incidents'] as const,
-    list: (filters?: { severity?: string; status?: string }) =>
+    list: (filters?: { severity?: string | string[]; status?: string | string[] }) =>
       ['incidents', 'list', filters] as const,
     detail: (id: string) => ['incidents', 'detail', id] as const,
   },

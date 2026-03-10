@@ -3,6 +3,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { safeInvalidateMany } from '@/lib/openclaw/queryUtils';
 import { OpenClawClient } from '@/lib/openclaw/client';
 import { mapAgentDetail } from '@/lib/openclaw/mappers';
 import { useSessionStore } from '@/stores/sessionStore';
@@ -31,10 +32,12 @@ export function useRestartAgent(client: OpenClawClient | null) {
       if (!client) throw new Error('No client');
       return client.restartAgent(agentId);
     },
-    onSuccess: (_data, agentId) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.all });
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.overview });
+    onSuccess: async (_data, agentId) => {
+      await safeInvalidateMany(queryClient, [
+        { queryKey: queryKeys.agents.all, label: 'agents' },
+        { queryKey: queryKeys.agents.detail(agentId), label: `agent:${agentId}` },
+        { queryKey: queryKeys.overview, label: 'overview' },
+      ]);
     },
   });
 }
@@ -47,9 +50,11 @@ export function usePingAgent(client: OpenClawClient | null) {
       if (!client) throw new Error('No client');
       return client.pingAgent(agentId);
     },
-    onSuccess: (_data, agentId) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.overview });
+    onSuccess: async (_data, agentId) => {
+      await safeInvalidateMany(queryClient, [
+        { queryKey: queryKeys.agents.detail(agentId), label: `agent:${agentId}` },
+        { queryKey: queryKeys.overview, label: 'overview' },
+      ]);
     },
   });
 }

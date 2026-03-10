@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -19,6 +19,7 @@ import Colors from '@/constants/colors';
 import { openClawAuth } from '@/lib/openclaw/auth';
 import {
   buildSessionFromOverview,
+  getGatewayUrlWarning,
   isUnauthorizedConnectionError,
   normalizeGatewayUrl,
   toConnectionErrorMessage,
@@ -39,6 +40,9 @@ export default function ConnectScreen() {
   const [showToken, setShowToken] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const gatewayWarning = useMemo(() => getGatewayUrlWarning(gatewayUrl), [gatewayUrl]);
+  const tokenStorageLabel =
+    Platform.OS === 'web' ? 'Stored in browser localStorage (web fallback)' : 'Stored in Expo SecureStore';
 
   useEffect(() => {
     let isMounted = true;
@@ -162,7 +166,7 @@ export default function ConnectScreen() {
               </View>
               <View style={styles.signalCopy}>
                 <Text style={styles.signalLabel}>Secure token storage</Text>
-                <Text style={styles.signalValue}>Stored in Expo SecureStore</Text>
+                <Text style={styles.signalValue}>{tokenStorageLabel}</Text>
               </View>
             </View>
           </View>
@@ -184,6 +188,7 @@ export default function ConnectScreen() {
           <Text style={styles.helperText}>
             Local network addresses default to `http://`. Public domains default to `https://`.
           </Text>
+          {gatewayWarning ? <Text style={styles.warningText}>{gatewayWarning}</Text> : null}
 
           <Text style={[styles.sectionLabel, styles.tokenLabel]}>Operator token</Text>
           <View style={styles.tokenRow}>
@@ -372,6 +377,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     marginTop: 10,
+  },
+  warningText: {
+    color: Colors.warning,
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 8,
   },
   tokenRow: {
     flexDirection: 'row',

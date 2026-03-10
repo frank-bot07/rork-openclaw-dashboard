@@ -132,9 +132,9 @@ export function mapRunSummary(raw: GatewayRunResponse): RunSummary {
     delegatedAgentNames: raw.delegatedAgentNames ?? [],
     canRetry:
       raw.canRetry ??
-      raw.status === 'failed' ||
-      raw.status === 'degraded' ||
-      raw.status === 'cancelled',
+      (raw.status === 'failed' ||
+        raw.status === 'degraded' ||
+        raw.status === 'cancelled'),
     metadata: raw.metadata,
   };
 }

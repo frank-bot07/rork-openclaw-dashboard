@@ -3,6 +3,7 @@
  */
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { safeInvalidateMany } from '@/lib/openclaw/queryUtils';
 import { OpenClawClient } from '@/lib/openclaw/client';
 import { mapRunSummary } from '@/lib/openclaw/mappers';
 import { useSessionStore } from '@/stores/sessionStore';
@@ -35,9 +36,11 @@ export function useRetryRun(client: OpenClawClient | null) {
       if (!client) throw new Error('No client');
       return client.retryRun(runId);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.runs.all });
-      queryClient.invalidateQueries({ queryKey: queryKeys.overview });
+    onSuccess: async () => {
+      await safeInvalidateMany(queryClient, [
+        { queryKey: queryKeys.runs.all, label: 'runs' },
+        { queryKey: queryKeys.overview, label: 'overview' },
+      ]);
     },
   });
 }

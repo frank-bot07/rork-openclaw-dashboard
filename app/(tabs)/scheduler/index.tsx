@@ -23,6 +23,7 @@ import Colors from '@/constants/colors';
 import { useIncidents } from '@/hooks/useIncidents';
 import { useRetryRun, useRuns } from '@/hooks/useRuns';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { safeInvalidateMany, safeInvalidateQueries } from '@/lib/openclaw/queryUtils';
 import { useOpenClaw } from '@/providers/OpenClawProvider';
 import { useUIStore } from '@/stores/uiStore';
 import type { Incident, RunSummary } from '@/types/openclaw';
@@ -167,7 +168,7 @@ export default function RunsScreen() {
       failedRunsQuery.refetch(),
       recentRunsQuery.refetch(),
       incidentsQuery.refetch(),
-      queryClient.invalidateQueries({ queryKey: queryKeys.overview }),
+      safeInvalidateMany(queryClient, [{ queryKey: queryKeys.overview, label: 'overview' }]),
     ]);
 
     setIsRefreshing(false);
@@ -192,7 +193,7 @@ export default function RunsScreen() {
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               retryRunMutation.mutate(run.id, {
                 onSuccess: async () => {
-                  await queryClient.invalidateQueries({ queryKey: queryKeys.incidents.all });
+                  await safeInvalidateQueries(queryClient, queryKeys.incidents.all, 'incidents');
                   void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
                 },
                 onError: (error) => {

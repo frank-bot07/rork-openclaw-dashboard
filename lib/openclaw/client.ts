@@ -258,7 +258,7 @@ export function createStoredSessionClient(
     timeoutMs: DEFAULT_TIMEOUT_MS,
     retry: DEFAULT_RETRY_CONFIG,
     ...config,
-    getAuthToken: config.getAuthToken ?? (() => openClawAuth.getAccessToken()),
+    getAuthToken: config.getAuthToken ?? (() => openClawAuth.getValidAccessToken()),
   });
 }
 

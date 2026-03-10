@@ -4,6 +4,7 @@ import createContextHook from '@nkzw/create-context-hook';
 import { useAgents } from '@/hooks/useAgents';
 import { createStoredSessionClient, OpenClawClient } from '@/lib/openclaw/client';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { safeInvalidateMany } from '@/lib/openclaw/queryUtils';
 import { useSessionStore } from '@/stores/sessionStore';
 import type { Agent, HeartbeatEntry } from '@/types/openclaw';
 
@@ -49,7 +50,7 @@ export const [OpenClawProvider, useOpenClaw] = createContextHook<OpenClawContext
       uptimePercent: connectionState === 'connected' ? 99.9 : 0,
     };
 
-    const agentHeartbeats = (agentsQuery.data ?? []).map((agent) => ({
+    const agentHeartbeats = (agentsQuery.data ?? []).map<HeartbeatEntry>((agent) => ({
       id: `hb-${agent.id}`,
       targetId: agent.id,
       targetName: agent.name,
@@ -71,15 +72,19 @@ export const [OpenClawProvider, useOpenClaw] = createContextHook<OpenClawContext
   const refreshData = useCallback(async () => {
     setIsRefreshing(true);
 
-    await Promise.allSettled([
-      queryClient.invalidateQueries({ queryKey: queryKeys.overview }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.all }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.incidents.all }),
-      agentsQuery.refetch(),
-    ]);
-
-    setIsRefreshing(false);
+    try {
+      await Promise.allSettled([
+        safeInvalidateMany(queryClient, [
+          { queryKey: queryKeys.overview, label: 'overview' },
+          { queryKey: queryKeys.agents.all, label: 'agents' },
+          { queryKey: queryKeys.runs.all, label: 'runs' },
+          { queryKey: queryKeys.incidents.all, label: 'incidents' },
+        ]),
+        agentsQuery.refetch(),
+      ]);
+    } finally {
+      setIsRefreshing(false);
+    }
   }, [agentsQuery, queryClient]);
 
   const retryAgents = useCallback(async () => {

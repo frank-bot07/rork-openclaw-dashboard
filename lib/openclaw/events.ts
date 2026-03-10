@@ -38,6 +38,7 @@ export interface SubscribeToEventsOptions {
   onEvent: (event: EventPayload) => void;
   onError?: (error: OpenClawClientError) => void;
   onConnectionStateChange?: (state: ConnectionState) => void;
+  onFallbackStateChange?: (isUsingPollingFallback: boolean) => void;
 }
 
 export interface OpenClawEventSubscription {
@@ -45,6 +46,9 @@ export interface OpenClawEventSubscription {
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 4_000;
+const MAX_SSE_RETRY_DELAY_MS = 30_000;
+const MAX_SSE_RETRIES = 5;
+const SSE_RETRY_BASE_DELAY_MS = 1_000;
 
 export class OpenClawEventsAdapter {
   constructor(private readonly config: OpenClawEventsAdapterConfig) {}
@@ -52,13 +56,26 @@ export class OpenClawEventsAdapter {
   subscribe(options: SubscribeToEventsOptions): OpenClawEventSubscription {
     const transport = options.transport ?? this.config.transport ?? 'auto';
     const pollIntervalMs = options.pollIntervalMs ?? this.config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    const canUseSse = Boolean(this.config.eventSourceFactory);
     let cursor = options.cursor;
     let closed = false;
     let pollTimeout: ReturnType<typeof setTimeout> | null = null;
+    let sseRetryTimeout: ReturnType<typeof setTimeout> | null = null;
     let source: EventSourceLike | null = null;
+    let sseRetryCount = 0;
+    let usingPollingFallback = false;
 
     const notifyConnection = (state: ConnectionState) => {
       options.onConnectionStateChange?.(state);
+    };
+
+    const notifyFallbackState = (isUsingPollingFallback: boolean) => {
+      if (usingPollingFallback === isUsingPollingFallback) {
+        return;
+      }
+
+      usingPollingFallback = isUsingPollingFallback;
+      options.onFallbackStateChange?.(isUsingPollingFallback);
     };
 
     const emitEvent = (event: EventPayload) => {
@@ -79,8 +96,14 @@ export class OpenClawEventsAdapter {
         pollTimeout = null;
       }
 
+      if (sseRetryTimeout) {
+        clearTimeout(sseRetryTimeout);
+        sseRetryTimeout = null;
+      }
+
       source?.close();
       source = null;
+      notifyFallbackState(false);
       notifyConnection('disconnected');
     };
 
@@ -90,6 +113,7 @@ export class OpenClawEventsAdapter {
       }
 
       pollTimeout = setTimeout(() => {
+        pollTimeout = null;
         void poll();
       }, pollIntervalMs);
     };
@@ -115,14 +139,53 @@ export class OpenClawEventsAdapter {
         }
 
         const body = (await response.json()) as GatewayCollectionResponse<EventPayload>;
-        body.items.forEach((event) => emitEvent(normalizeEventPayload(event)));
+        body.items
+          .map((event) => safeNormalizeEventPayload(event))
+          .filter((event): event is EventPayload => Boolean(event))
+          .forEach((event) => emitEvent(event));
         cursor = body.nextCursor ?? cursor;
         notifyConnection('connected');
       } catch (error) {
         handleError(error);
       } finally {
-        schedulePoll();
+        if (transport === 'polling' || usingPollingFallback || (!canUseSse && transport === 'auto')) {
+          schedulePoll();
+        }
       }
+    };
+
+    const startPollingFallback = () => {
+      if (closed) {
+        return;
+      }
+
+      notifyFallbackState(true);
+      void poll();
+    };
+
+    const scheduleSseReconnect = () => {
+      if (closed) {
+        return;
+      }
+
+      if (sseRetryCount >= MAX_SSE_RETRIES) {
+        startPollingFallback();
+        return;
+      }
+
+      const delayMs = Math.min(
+        SSE_RETRY_BASE_DELAY_MS * 2 ** sseRetryCount,
+        MAX_SSE_RETRY_DELAY_MS
+      );
+      sseRetryCount += 1;
+      notifyConnection('reconnecting');
+      sseRetryTimeout = setTimeout(() => {
+        sseRetryTimeout = null;
+        void startSse().catch((error) => {
+          handleError(error);
+          scheduleSseReconnect();
+        });
+      }, delayMs);
     };
 
     const startSse = async () => {
@@ -132,6 +195,7 @@ export class OpenClawEventsAdapter {
         });
       }
 
+      source?.close();
       notifyConnection('connecting');
       const sourceUrl = buildUrl(this.config.baseUrl, '/api/v1/events/stream', {
         conversationId: options.conversationId,
@@ -149,12 +213,22 @@ export class OpenClawEventsAdapter {
         }
 
         try {
-          const parsed = JSON.parse(event.data) as EventPayload | EventPayload[];
+          const parsed = JSON.parse(event.data) as unknown;
           const events = Array.isArray(parsed) ? parsed : [parsed];
-          events.map(normalizeEventPayload).forEach((payload) => emitEvent(payload));
+          const nextEvents = events
+            .map((payload) => safeNormalizeEventPayload(payload))
+            .filter((payload): payload is EventPayload => Boolean(payload));
+
+          if (nextEvents.length === 0) {
+            return;
+          }
+
+          sseRetryCount = 0;
+          notifyFallbackState(false);
+          nextEvents.forEach((payload) => emitEvent(payload));
           notifyConnection('connected');
         } catch (error) {
-          handleError(error);
+          console.error('[Events] Ignoring malformed SSE event payload.', error);
         }
       });
 
@@ -163,8 +237,8 @@ export class OpenClawEventsAdapter {
         source?.close();
         source = null;
 
-        if (!closed && transport === 'auto') {
-          void poll();
+        if (!closed && (transport === 'auto' || transport === 'sse')) {
+          scheduleSseReconnect();
         }
       };
     };
@@ -172,11 +246,12 @@ export class OpenClawEventsAdapter {
     if (transport === 'sse') {
       void startSse().catch((error) => {
         handleError(error);
+        scheduleSseReconnect();
       });
     } else if (transport === 'auto' && this.config.eventSourceFactory) {
       void startSse().catch((error) => {
         handleError(error);
-        void poll();
+        scheduleSseReconnect();
       });
     } else {
       void poll();
@@ -243,4 +318,22 @@ function normalizeEventPayload(event: EventPayload): EventPayload {
     createdAt: event.createdAt ?? new Date().toISOString(),
     payload: event.payload ?? {},
   };
+}
+
+function safeNormalizeEventPayload(event: unknown) {
+  if (!isEventPayload(event)) {
+    console.error('[Events] Dropping malformed event payload.');
+    return null;
+  }
+
+  return normalizeEventPayload(event);
+}
+
+function isEventPayload(value: unknown): value is EventPayload {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const event = value as Partial<EventPayload>;
+  return typeof event.id === 'string' && typeof event.type === 'string';
 }

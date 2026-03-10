@@ -33,7 +33,38 @@ export function normalizeGatewayUrl(input: string) {
     throw new Error('Gateway URL must start with http:// or https://.');
   }
 
+  if (!url.hostname) {
+    throw new Error('Enter a valid gateway URL.');
+  }
+
+  if (url.username || url.password) {
+    throw new Error('Gateway URL cannot include embedded credentials.');
+  }
+
+  if (url.search || url.hash) {
+    throw new Error('Gateway URL cannot include query parameters or fragments.');
+  }
+
+  if (url.pathname && url.pathname !== '/') {
+    throw new Error('Enter the gateway origin only, without extra paths.');
+  }
+
   return url.toString().replace(/\/+$/, '');
+}
+
+export function getGatewayUrlWarning(input: string) {
+  try {
+    const url = new URL(normalizeGatewayUrl(input));
+    if (url.protocol !== 'http:') {
+      return null;
+    }
+
+    return isLocalGatewayHost(url.hostname)
+      ? 'Non-HTTPS is only safe on a trusted local network.'
+      : 'This gateway is using HTTP. Your operator token can be exposed on untrusted networks.';
+  } catch {
+    return null;
+  }
 }
 
 export function buildSessionFromOverview(
@@ -123,5 +154,9 @@ function isLocalGatewayInput(value: string) {
     .replace(/^\[/, '')
     .replace(/\]$/, '');
 
+  return isLocalGatewayHost(hostname);
+}
+
+function isLocalGatewayHost(hostname: string) {
   return LOCAL_GATEWAY_PATTERNS.some((pattern) => pattern.test(hostname));
 }

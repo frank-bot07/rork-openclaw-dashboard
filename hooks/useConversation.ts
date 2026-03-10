@@ -4,6 +4,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { OpenClawClient, OpenClawClientError } from '@/lib/openclaw/client';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { safeInvalidateQueries } from '@/lib/openclaw/queryUtils';
 import { mapConversation, mapConversationMessage } from '@/lib/openclaw/mappers';
 import { useSessionStore } from '@/stores/sessionStore';
 import type { ChatMessage, ConversationViewModel } from '@/types/openclaw';
@@ -62,22 +63,23 @@ export function useSendMessage(client: OpenClawClient | null) {
     },
     onMutate: async (variables) => {
       const conversationKey = queryKeys.conversations.byAgent(variables.agentId);
+      const mutationId = createMutationId();
+      const optimisticTimestamp = new Date().toISOString();
       await queryClient.cancelQueries({ queryKey: conversationKey });
 
-      const previousConversation = queryClient.getQueryData<ConversationViewModel>(conversationKey);
       const optimisticMessage: ChatMessage = {
-        id: `optimistic:${Date.now()}`,
+        id: `optimistic:${mutationId}`,
         agentId: variables.agentId,
         role: 'user',
         content: variables.content,
-        timestamp: new Date().toISOString(),
-        conversationId: variables.conversationId ?? previousConversation?.id ?? null,
+        timestamp: optimisticTimestamp,
+        conversationId: variables.conversationId ?? queryClient.getQueryData<ConversationViewModel>(conversationKey)?.id ?? null,
         status: 'pending',
         metadata: variables.metadata,
       };
 
       queryClient.setQueryData<ConversationViewModel>(conversationKey, (current) => {
-        const currentConversation = current ?? previousConversation;
+        const currentConversation = current;
 
         return {
           id:
@@ -95,17 +97,13 @@ export function useSendMessage(client: OpenClawClient | null) {
 
       return {
         agentId: variables.agentId,
+        mutationId,
         optimisticMessageId: optimisticMessage.id,
-        previousConversation,
+        optimisticTimestamp,
       };
     },
     onError: (_error, variables, context) => {
       const conversationKey = queryKeys.conversations.byAgent(variables.agentId);
-
-      if (context?.previousConversation) {
-        queryClient.setQueryData(conversationKey, context.previousConversation);
-        return;
-      }
 
       queryClient.setQueryData<ConversationViewModel>(conversationKey, (current) => {
         if (!current) {
@@ -141,12 +139,18 @@ export function useSendMessage(client: OpenClawClient | null) {
         };
       });
     },
-    onSettled: (_data, _error, variables) => {
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.conversations.byAgent(variables.agentId),
-      });
+    onSettled: async (_data, _error, variables) => {
+      await safeInvalidateQueries(
+        queryClient,
+        queryKeys.conversations.byAgent(variables.agentId),
+        `conversation:${variables.agentId}`
+      );
     },
   });
+}
+
+function createMutationId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function mergeMessages(messages: ChatMessage[]) {

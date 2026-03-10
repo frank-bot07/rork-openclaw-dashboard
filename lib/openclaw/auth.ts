@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
-import { Alert } from 'react-native';
+import { Platform } from 'react-native';
 import { useSessionStore } from '@/stores/sessionStore';
 import type { ConnectionState, GatewayCapabilities, Session } from '@/types/openclaw';
 
@@ -11,9 +11,9 @@ const SECURE_STORE_OPTIONS: SecureStore.SecureStoreOptions = {
   keychainService: 'openclaw.mobile',
   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
 };
-const SESSION_EXPIRED_TITLE = 'Session expired';
 const SESSION_EXPIRED_MESSAGE = 'Session expired. Please reconnect.';
 let expiringSessionPromise: Promise<void> | null = null;
+let hasWarnedWebStorageFallback = false;
 
 export const DEFAULT_GATEWAY_CAPABILITIES: GatewayCapabilities = {
   canReadOverview: false,
@@ -54,25 +54,29 @@ export interface SessionBootstrapInput {
 
 export const openClawAuth = {
   async saveTokens(tokens: SessionTokens) {
-    await SecureStore.setItemAsync(SESSION_TOKENS_KEY, JSON.stringify(tokens), SECURE_STORE_OPTIONS);
+    await setStoredTokensRaw(JSON.stringify(tokens));
   },
 
   async getTokens() {
-    const rawValue = await SecureStore.getItemAsync(SESSION_TOKENS_KEY, SECURE_STORE_OPTIONS);
+    const rawValue = await getStoredTokensRaw();
     if (!rawValue) {
       return null;
     }
 
     try {
       return JSON.parse(rawValue) as SessionTokens;
-    } catch {
-      await SecureStore.deleteItemAsync(SESSION_TOKENS_KEY, SECURE_STORE_OPTIONS);
+    } catch (error) {
+      console.error('[Auth] Failed to parse stored tokens.', error);
       return null;
     }
   },
 
   async getAccessToken() {
-    return (await this.getTokens())?.accessToken ?? null;
+    return (await this.getValidatedTokens())?.accessToken ?? null;
+  },
+
+  async getValidAccessToken() {
+    return (await this.getValidatedTokens({ throwOnExpired: true }))?.accessToken ?? null;
   },
 
   async hasActiveSession() {
@@ -89,7 +93,7 @@ export const openClawAuth = {
   },
 
   async clearTokens() {
-    await SecureStore.deleteItemAsync(SESSION_TOKENS_KEY, SECURE_STORE_OPTIONS);
+    await deleteStoredTokens();
   },
 
   async saveSession(session: Session) {
@@ -103,6 +107,17 @@ export const openClawAuth = {
         session.gatewayVersion ??
         (typeof session.metadata?.gatewayVersion === 'string' ? session.metadata.gatewayVersion : null),
     };
+
+    const storedTokens = await this.getTokens();
+    if (storedTokens?.accessToken) {
+      await this.saveTokens({
+        ...storedTokens,
+        accessTokenExpiresAt:
+          normalizedSession.accessTokenExpiresAt ?? storedTokens.accessTokenExpiresAt ?? null,
+        refreshTokenExpiresAt:
+          normalizedSession.refreshTokenExpiresAt ?? storedTokens.refreshTokenExpiresAt ?? null,
+      });
+    }
 
     await Promise.all([
       AsyncStorage.setItem(
@@ -121,7 +136,7 @@ export const openClawAuth = {
 
   async getSession(): Promise<Session | null> {
     const [tokens, storedSession, lastGatewayUrl] = await Promise.all([
-      this.getTokens(),
+      this.getValidatedTokens(),
       AsyncStorage.getItem(SESSION_METADATA_KEY),
       this.getLastGatewayUrl(),
     ]);
@@ -161,9 +176,17 @@ export const openClawAuth = {
           parsed.gatewayVersion ??
           (typeof parsed.metadata?.gatewayVersion === 'string' ? parsed.metadata.gatewayVersion : null),
       };
-    } catch {
-      await AsyncStorage.removeItem(SESSION_METADATA_KEY);
-      return null;
+    } catch (error) {
+      console.error('[Auth] Failed to parse stored session metadata.', error);
+
+      if (!lastGatewayUrl) {
+        return null;
+      }
+
+      return this.bootstrapSession({
+        id: lastGatewayUrl,
+        gatewayUrl: lastGatewayUrl,
+      });
     }
   },
 
@@ -180,15 +203,8 @@ export const openClawAuth = {
     }
 
     expiringSessionPromise = (async () => {
-      const store = useSessionStore.getState();
-      const shouldNotify = store.connectionState !== 'unauthorized';
-
       await this.clearSession();
       useSessionStore.getState().setUnauthorized(reason);
-
-      if (shouldNotify) {
-        Alert.alert(SESSION_EXPIRED_TITLE, SESSION_EXPIRED_MESSAGE);
-      }
     })().finally(() => {
       expiringSessionPromise = null;
     });
@@ -201,7 +217,7 @@ export const openClawAuth = {
   },
 
   async bootstrapSession(input: SessionBootstrapInput): Promise<Session | null> {
-    const tokens = await this.getTokens();
+    const tokens = await this.getValidatedTokens();
     if (!tokens?.accessToken) {
       return null;
     }
@@ -226,4 +242,85 @@ export const openClawAuth = {
       issuedAt: input.issuedAt ?? null,
     };
   },
+
+  async getValidatedTokens(options?: { throwOnExpired?: boolean }) {
+    const tokens = await this.getTokens();
+    if (!tokens?.accessToken) {
+      return null;
+    }
+
+    if (!isExpiredTimestamp(tokens.accessTokenExpiresAt)) {
+      return tokens;
+    }
+
+    console.warn('[Auth] Access token has expired. Expiring stored session.');
+    await this.expireSession();
+
+    if (options?.throwOnExpired) {
+      throw new Error(SESSION_EXPIRED_MESSAGE);
+    }
+
+    return null;
+  },
 };
+
+function isExpiredTimestamp(value?: string | null) {
+  if (!value) {
+    return false;
+  }
+
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    console.warn('[Auth] Ignoring invalid access token expiration timestamp.');
+    return false;
+  }
+
+  return Date.now() >= timestamp;
+}
+
+async function setStoredTokensRaw(value: string) {
+  if (Platform.OS === 'web') {
+    const localStorage = getWebStorage();
+    localStorage?.setItem(SESSION_TOKENS_KEY, value);
+    return;
+  }
+
+  await SecureStore.setItemAsync(SESSION_TOKENS_KEY, value, SECURE_STORE_OPTIONS);
+}
+
+async function getStoredTokensRaw() {
+  if (Platform.OS === 'web') {
+    return getWebStorage()?.getItem(SESSION_TOKENS_KEY) ?? null;
+  }
+
+  return SecureStore.getItemAsync(SESSION_TOKENS_KEY, SECURE_STORE_OPTIONS);
+}
+
+async function deleteStoredTokens() {
+  if (Platform.OS === 'web') {
+    getWebStorage()?.removeItem(SESSION_TOKENS_KEY);
+    return;
+  }
+
+  await SecureStore.deleteItemAsync(SESSION_TOKENS_KEY, SECURE_STORE_OPTIONS);
+}
+
+function getWebStorage() {
+  warnWebStorageFallback();
+
+  if (typeof globalThis.localStorage === 'undefined') {
+    console.error('[Auth] localStorage is unavailable on web. Session persistence is disabled.');
+    return null;
+  }
+
+  return globalThis.localStorage;
+}
+
+function warnWebStorageFallback() {
+  if (hasWarnedWebStorageFallback) {
+    return;
+  }
+
+  hasWarnedWebStorageFallback = true;
+  console.warn('[Auth] SecureStore is unavailable on web. Falling back to localStorage.');
+}
