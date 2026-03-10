@@ -1,108 +1,326 @@
-import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TextInput, Pressable,
-  KeyboardAvoidingView, Platform, FlatList, Alert, useWindowDimensions,
+  ActivityIndicator,
+  FlatList,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  useWindowDimensions,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
-import {
-  MessageSquare, Settings2, Radio, Send, Bot, User, AlertCircle,
-  Cpu, FileText, FolderOpen, ChevronDown, Trash2, Eraser, Sparkles,
-} from 'lucide-react-native';
+import { useIsFocused } from '@react-navigation/native';
+import { useQueryClient } from '@tanstack/react-query';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
-import Colors from '@/constants/colors';
-import { useOpenClaw } from '@/providers/OpenClawProvider';
-import { mockModels } from '@/mocks/models';
-import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
+import { AlertCircle, Bot, RefreshCw, Send, Sparkles, User } from 'lucide-react-native';
+import DelegationEvent from '@/components/DelegationEvent';
 import StatusDot from '@/components/StatusDot';
-import ChannelIcon from '@/components/ChannelIcon';
+import ToolEvent from '@/components/ToolEvent';
 import TypingIndicator from '@/components/TypingIndicator';
-import { ChatMessage, AIModel, Agent, ChannelBinding } from '@/types/openclaw';
-import { mockQuickActions } from '@/mocks/activity';
+import Colors from '@/constants/colors';
+import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
+import { useAgentDetail } from '@/hooks/useAgentDetail';
+import { useConversation, useSendMessage } from '@/hooks/useConversation';
+import { openClawAuth } from '@/lib/openclaw/auth';
+import { createOpenClawEventsAdapter } from '@/lib/openclaw/events';
+import { mapConversationMessage } from '@/lib/openclaw/mappers';
+import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { useOpenClaw } from '@/providers/OpenClawProvider';
+import { useSessionStore } from '@/stores/sessionStore';
+import type { Agent, ChatMessage, ConversationViewModel, EventPayload } from '@/types/openclaw';
 
-type DetailTab = 'chat' | 'config' | 'channels';
+const EVENT_POLL_INTERVAL_MS = 3_000;
 
 export default function AgentDetailScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const params = useLocalSearchParams<{ id?: string | string[] }>();
+  const agentId = Array.isArray(params.id) ? params.id[0] : params.id;
   const router = useRouter();
-  const { agents, chatMessages, sendMessage, updateAgent, deleteAgent, clearChat, isTyping, quickActions } = useOpenClaw();
-  const agent = agents.find(a => a.id === id);
-  const [activeTab, setActiveTab] = useState<DetailTab>('chat');
+  const isFocused = useIsFocused();
+  const queryClient = useQueryClient();
+  const { client, agents } = useOpenClaw();
+  const gatewayUrl = useSessionStore((state) => state.gatewayUrl ?? state.session?.gatewayUrl ?? null);
+  const agentDetailQuery = useAgentDetail(client, agentId);
+  const conversationQuery = useConversation(client, agentId);
+  const sendMessageMutation = useSendMessage(client);
+  const cursorRef = useRef<string | undefined>(undefined);
+  const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
+  const [lastSubmittedAt, setLastSubmittedAt] = useState<string | null>(null);
+  const [usingRefetchFallback, setUsingRefetchFallback] = useState(false);
 
-  const messages = useMemo(() => {
-    if (!agent) return [];
-    return chatMessages[agent.id] || [];
-  }, [agent, chatMessages]);
+  const agent = agentDetailQuery.data?.agent ?? agents.find((candidate) => candidate.id === agentId);
+  const conversationKey = useMemo(
+    () => queryKeys.conversations.byAgent(agentId ?? ''),
+    [agentId]
+  );
 
-  const agentIsTyping = useMemo(() => {
-    if (!agent) return false;
-    return isTyping[agent.id] ?? false;
-  }, [agent, isTyping]);
+  useEffect(() => {
+    cursorRef.current = conversationQuery.data?.nextCursor ?? undefined;
+  }, [conversationQuery.data?.nextCursor]);
+
+  const updateConversationCache = useCallback(
+    (updater: (current: ConversationViewModel | undefined) => ConversationViewModel) => {
+      if (!agentId) {
+        return;
+      }
+
+      queryClient.setQueryData<ConversationViewModel>(conversationKey, (current) =>
+        updater(current ?? createEmptyConversation(agentId, agent))
+      );
+    },
+    [agent, agentId, conversationKey, queryClient]
+  );
+
+  const handleRealtimeEvent = useCallback(
+    (event: EventPayload) => {
+      cursorRef.current = event.createdAt;
+
+      if (event.type === 'message.delta') {
+        const payload = event.payload as { messageId?: unknown; delta?: unknown };
+        const messageId = typeof payload.messageId === 'string' ? payload.messageId : null;
+        const delta = typeof payload.delta === 'string' ? payload.delta : '';
+
+        if (!messageId || !delta) {
+          return;
+        }
+
+        setStreamingMessage((current) => {
+          const base =
+            current && current.id === messageId
+              ? current
+              : createStreamingAssistantMessage({
+                  id: messageId,
+                  agentId: agentId ?? event.agentId ?? agent?.id ?? '',
+                  conversationId: event.conversationId ?? resolveConversationId(conversationQuery.data?.id) ?? null,
+                  runId: event.runId ?? null,
+                  timestamp: event.createdAt,
+                });
+
+          return {
+            ...base,
+            content: `${base.content}${delta}`,
+            timestamp: event.createdAt,
+            conversationId: event.conversationId ?? base.conversationId ?? null,
+            runId: event.runId ?? base.runId ?? null,
+            status: 'streaming',
+          };
+        });
+        return;
+      }
+
+      if (event.type === 'message.completed') {
+        const payload = event.payload as { message?: unknown };
+
+        if (!payload.message || typeof payload.message !== 'object') {
+          return;
+        }
+
+        const completedMessage = {
+          ...mapConversationMessage(payload.message as Parameters<typeof mapConversationMessage>[0]),
+          status: 'complete' as const,
+        };
+
+        setStreamingMessage((current) => (current?.id === completedMessage.id ? null : current));
+        updateConversationCache((current) => ({
+          ...current,
+          id: completedMessage.conversationId ?? current.id,
+          nextCursor: event.createdAt,
+          messages: mergeMessages([...current.messages, completedMessage]),
+        }));
+        return;
+      }
+
+      const timelineEvent = toTimelineEventMessage(event, agentId ?? agent?.id ?? '');
+      if (!timelineEvent) {
+        if (event.type === 'run.updated' || event.type === 'incident.created' || event.type === 'agent.updated') {
+          void conversationQuery.refetch();
+          void agentDetailQuery.refetch();
+        }
+        return;
+      }
+
+      updateConversationCache((current) => {
+        const events = mergeEvents([...current.events, event]);
+        const messages = mergeMessages([...current.messages, timelineEvent]);
+
+        return {
+          ...current,
+          nextCursor: event.createdAt,
+          events,
+          messages,
+        };
+      });
+    },
+    [
+      agent?.id,
+      agentDetailQuery,
+      agentId,
+      conversationQuery,
+      updateConversationCache,
+    ]
+  );
+
+  useEffect(() => {
+    if (!agentId || !client || !gatewayUrl || !isFocused) {
+      setUsingRefetchFallback(false);
+      return;
+    }
+
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    let subscriptionClosed = false;
+    const startRefetchFallback = () => {
+      if (intervalId) {
+        return;
+      }
+
+      setUsingRefetchFallback(true);
+      intervalId = setInterval(() => {
+        void conversationQuery.refetch();
+      }, EVENT_POLL_INTERVAL_MS);
+    };
+
+    const adapter = createOpenClawEventsAdapter({
+      baseUrl: gatewayUrl,
+      getAuthToken: () => openClawAuth.getAccessToken(),
+      pollIntervalMs: EVENT_POLL_INTERVAL_MS,
+      transport: 'auto',
+    });
+
+    const subscription = adapter.subscribe({
+      agentId,
+      conversationId: resolveConversationId(conversationQuery.data?.id) ?? undefined,
+      cursor: cursorRef.current,
+      pollIntervalMs: EVENT_POLL_INTERVAL_MS,
+      onEvent: (event) => {
+        if (subscriptionClosed) {
+          return;
+        }
+
+        setUsingRefetchFallback(false);
+        handleRealtimeEvent(event);
+      },
+      onError: () => {
+        if (subscriptionClosed) {
+          return;
+        }
+
+        subscription.close();
+        startRefetchFallback();
+      },
+    });
+
+    return () => {
+      subscriptionClosed = true;
+      subscription.close();
+      setUsingRefetchFallback(false);
+
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [
+    agentId,
+    client,
+    conversationQuery,
+    gatewayUrl,
+    handleRealtimeEvent,
+    isFocused,
+  ]);
+
+  const conversation = conversationQuery.data;
+  const timeline = useMemo(() => {
+    const eventMessages = (conversation?.events ?? [])
+      .map((event) => toTimelineEventMessage(event, agentId ?? agent?.id ?? ''))
+      .filter((message): message is ChatMessage => Boolean(message));
+
+    const allMessages = [
+      ...(conversation?.messages ?? []),
+      ...eventMessages,
+      ...(streamingMessage ? [streamingMessage] : []),
+    ];
+
+    return mergeMessages(allMessages);
+  }, [agent?.id, agentId, conversation?.events, conversation?.messages, streamingMessage]);
+
+  const lastSubmittedTime = lastSubmittedAt ? new Date(lastSubmittedAt).getTime() : null;
+  const hasReplySinceLastSend = useMemo(() => {
+    if (!lastSubmittedTime) {
+      return false;
+    }
+
+    return timeline.some((message) => {
+      const timestamp = new Date(message.timestamp).getTime();
+      return timestamp >= lastSubmittedTime && message.role !== 'user';
+    });
+  }, [lastSubmittedTime, timeline]);
+
+  useEffect(() => {
+    if (hasReplySinceLastSend) {
+      setLastSubmittedAt(null);
+    }
+  }, [hasReplySinceLastSend]);
+
+  useEffect(() => {
+    if (!sendMessageMutation.isError) {
+      return;
+    }
+
+    setLastSubmittedAt(null);
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+  }, [sendMessageMutation.isError]);
 
   const accentColor = useMemo(() => {
-    if (!agent) return { bg: Colors.primaryGlow, text: Colors.primary, border: 'rgba(61, 139, 255, 0.25)' };
+    if (!agent) {
+      return { bg: Colors.primaryGlow, text: Colors.primary, border: 'rgba(61, 139, 255, 0.25)' };
+    }
+
     return getAgentColor(agent.id);
   }, [agent]);
+  const ringColor = useMemo(() => (agent ? getStatusRingColor(agent.status) : Colors.textMuted), [agent]);
+  const statusLabel = agent
+    ? agent.status === 'online'
+      ? 'Online'
+      : agent.status === 'busy'
+        ? 'Busy'
+        : agent.status === 'degraded'
+          ? 'Degraded'
+          : 'Offline'
+    : 'Offline';
 
-  const ringColor = useMemo(() => {
-    if (!agent) return Colors.textMuted;
-    return getStatusRingColor(agent.status);
-  }, [agent]);
+  const isAgentLoading = !agent && agentDetailQuery.isLoading;
+  const isConversationLoading = conversationQuery.isLoading && !conversation;
+  const showTypingIndicator =
+    Boolean(lastSubmittedAt) &&
+    !hasReplySinceLastSend &&
+    !streamingMessage;
 
-  const handleDeleteAgent = useCallback(() => {
-    if (!agent) return;
-    Alert.alert(
-      'Delete Agent',
-      `This will permanently delete "${agent.name}" and all chat history.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            deleteAgent(agent.id);
-            void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-            router.back();
-          },
-        },
-      ],
-    );
-  }, [agent, deleteAgent, router]);
+  if (!agentId) {
+    return <NotFoundState router={router} title="Agent not found" subtitle="This agent route is invalid." />;
+  }
 
-  const handleClearChat = useCallback(() => {
-    if (!agent) return;
-    Alert.alert(
-      'Clear Chat',
-      `Remove all messages with "${agent.name}"?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Clear',
-          style: 'destructive',
-          onPress: () => {
-            clearChat(agent.id);
-            void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          },
-        },
-      ],
-    );
-  }, [agent, clearChat]);
-
-  if (!agent) {
+  if (isAgentLoading) {
     return (
-      <View style={styles.errorContainer}>
-        <Stack.Screen options={{ title: 'Not Found' }} />
-        <AlertCircle size={48} color={Colors.error} />
-        <Text style={styles.errorTitle}>Agent not found</Text>
-        <Text style={styles.errorSubtext}>This agent may have been deleted</Text>
-        <Pressable style={styles.goBackBtn} onPress={() => router.back()}>
-          <Text style={styles.goBackText}>Go Back</Text>
-        </Pressable>
+      <View style={styles.loadingScreen}>
+        <Stack.Screen options={{ title: 'Loading...' }} />
+        <ActivityIndicator size="large" color={Colors.primary} />
+        <Text style={styles.loadingTitle}>Loading agent</Text>
+        <Text style={styles.loadingSubtitle}>Fetching operational details.</Text>
       </View>
     );
   }
 
-  const statusLabel = agent.status === 'online' ? 'Online' : agent.status === 'busy' ? 'Busy' : 'Offline';
+  if (!agent) {
+    return (
+      <NotFoundState
+        router={router}
+        title="Agent not found"
+        subtitle="This agent may have been removed or is unavailable."
+      />
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -113,15 +331,6 @@ export default function AgentDetailScreen() {
           headerTintColor: Colors.text,
           headerTitleStyle: { fontWeight: '700' as const, fontSize: 18 },
           headerShadowVisible: false,
-          headerRight: () => (
-            <Pressable
-              onPress={handleDeleteAgent}
-              style={styles.headerDeleteBtn}
-              hitSlop={12}
-            >
-              <Trash2 size={18} color={Colors.error} />
-            </Pressable>
-          ),
         }}
       />
 
@@ -133,141 +342,187 @@ export default function AgentDetailScreen() {
           <Text style={styles.agentName}>{agent.name}</Text>
           <Text style={styles.agentModel}>{agent.model} · {agent.provider}</Text>
         </View>
-        <View style={[styles.statusBadge, {
-          backgroundColor: agent.status === 'online' ? Colors.successGlow
-            : agent.status === 'busy' ? Colors.warningGlow
-            : 'rgba(100, 100, 130, 0.12)',
-        }]}>
+        <View
+          style={[
+            styles.statusBadge,
+            {
+              backgroundColor:
+                agent.status === 'online'
+                  ? Colors.successGlow
+                  : agent.status === 'busy'
+                    ? Colors.warningGlow
+                    : agent.status === 'degraded'
+                      ? Colors.errorGlow
+                      : 'rgba(100, 100, 130, 0.12)',
+            },
+          ]}
+        >
           <StatusDot status={agent.status} size={6} />
-          <Text style={[styles.statusBadgeText, {
-            color: agent.status === 'online' ? Colors.success
-              : agent.status === 'busy' ? Colors.warning
-              : Colors.textMuted,
-          }]}>{statusLabel}</Text>
+          <Text
+            style={[
+              styles.statusBadgeText,
+              {
+                color:
+                  agent.status === 'online'
+                    ? Colors.success
+                    : agent.status === 'busy'
+                      ? Colors.warning
+                      : agent.status === 'degraded'
+                        ? Colors.error
+                        : Colors.textMuted,
+              },
+            ]}
+          >
+            {statusLabel}
+          </Text>
         </View>
       </View>
 
-      <View style={styles.tabRow}>
-        {([
-          { key: 'chat' as const, icon: MessageSquare, label: 'Chat' },
-          { key: 'config' as const, icon: Settings2, label: 'Config' },
-          { key: 'channels' as const, icon: Radio, label: 'Channels' },
-        ]).map(({ key, icon: Icon, label }) => (
-          <Pressable
-            key={key}
-            style={[styles.tabBtn, activeTab === key && styles.tabBtnActive]}
-            onPress={() => {
-              setActiveTab(key);
-              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            }}
-          >
-            <Icon size={16} color={activeTab === key ? Colors.primary : Colors.textMuted} />
-            <Text style={[styles.tabBtnText, activeTab === key && styles.tabBtnTextActive]}>
-              {label}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
+      <ChatView
+        agent={agent}
+        timeline={timeline}
+        isConversationLoading={isConversationLoading}
+        conversationError={conversationQuery.error instanceof Error ? conversationQuery.error.message : null}
+        onRetryConversation={() => void conversationQuery.refetch()}
+        onSend={(content) => {
+          const trimmed = content.trim();
+          if (!trimmed) {
+            return;
+          }
 
-      {activeTab === 'chat' && (
-        <ChatView
-          agentId={agent.id}
-          agentName={agent.name}
-          messages={messages}
-          onSend={sendMessage}
-          onClearChat={handleClearChat}
-          isTyping={agentIsTyping}
-          agentQuickActions={quickActions.filter(qa => qa.agentId === agent.id)}
-          accentColor={accentColor}
-        />
-      )}
-      {activeTab === 'config' && (
-        <ConfigView agent={agent} onUpdate={updateAgent} />
-      )}
-      {activeTab === 'channels' && (
-        <ChannelsView channels={agent.channels} />
-      )}
+          setLastSubmittedAt(new Date().toISOString());
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+          sendMessageMutation.mutate(
+            {
+              agentId,
+              conversationId: resolveConversationId(conversation?.id) ?? agent.conversationId ?? undefined,
+              content: trimmed,
+            },
+            {
+              onError: () => {
+                setLastSubmittedAt(null);
+              },
+            }
+          );
+        }}
+        isSending={sendMessageMutation.isPending}
+        isWaitingForReply={showTypingIndicator}
+        usingRefetchFallback={usingRefetchFallback}
+        accentColor={accentColor}
+      />
     </View>
   );
 }
 
-function ChatView({ agentId, agentName, messages, onSend, onClearChat, isTyping: typing, agentQuickActions, accentColor }: {
-  agentId: string;
-  agentName: string;
-  messages: ChatMessage[];
-  onSend: (agentId: string, content: string) => void;
-  onClearChat: () => void;
-  isTyping: boolean;
-  agentQuickActions: typeof mockQuickActions;
+function ChatView({
+  agent,
+  timeline,
+  isConversationLoading,
+  conversationError,
+  onRetryConversation,
+  onSend,
+  isSending,
+  isWaitingForReply,
+  usingRefetchFallback,
+  accentColor,
+}: {
+  agent: Agent;
+  timeline: ChatMessage[];
+  isConversationLoading: boolean;
+  conversationError: string | null;
+  onRetryConversation: () => void;
+  onSend: (content: string) => void;
+  isSending: boolean;
+  isWaitingForReply: boolean;
+  usingRefetchFallback: boolean;
   accentColor: { bg: string; text: string; border: string };
 }) {
   const [input, setInput] = useState('');
   const flatListRef = useRef<FlatList<ChatMessage>>(null);
   const { width: screenWidth } = useWindowDimensions();
   const maxBubbleWidth = useMemo(() => Math.min(screenWidth * 0.78, 340), [screenWidth]);
+  const suggestedPrompts = useMemo(() => getSuggestedPrompts(agent), [agent]);
 
-  const handleSend = useCallback(() => {
-    if (!input.trim()) return;
-    onSend(agentId, input.trim());
-    setInput('');
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-  }, [input, agentId, onSend]);
+  const handleSubmit = useCallback(
+    (content: string) => {
+      const trimmed = content.trim();
+      if (!trimmed || isSending) {
+        return;
+      }
+
+      setInput('');
+      onSend(trimmed);
+    },
+    [isSending, onSend]
+  );
 
   useEffect(() => {
-    if (messages.length > 0) {
-      const timer = setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
-      return () => clearTimeout(timer);
-    }
-  }, [messages.length, typing]);
+    const timer = setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: true });
+    }, 80);
 
-  const renderMessage = useCallback(({ item }: { item: ChatMessage }) => {
-    const isUser = item.role === 'user';
-    const isSystem = item.role === 'system';
+    return () => clearTimeout(timer);
+  }, [isWaitingForReply, timeline]);
 
-    if (isSystem) {
+  const renderTimelineItem = useCallback(
+    ({ item }: { item: ChatMessage }) => {
+      if (isDelegationMessage(item)) {
+        return <DelegationEvent message={item} />;
+      }
+
+      if (isToolMessage(item)) {
+        return <ToolEvent message={item} />;
+      }
+
+      if (item.role === 'system') {
+        return (
+          <View style={styles.systemMsg}>
+            <AlertCircle size={14} color={Colors.warning} />
+            <Text style={styles.systemMsgText}>{item.content}</Text>
+          </View>
+        );
+      }
+
+      const isUser = item.role === 'user';
+
       return (
-        <View style={styles.systemMsg}>
-          <AlertCircle size={14} color={Colors.warning} />
-          <Text style={styles.systemMsgText}>{item.content}</Text>
+        <View style={[styles.msgRow, isUser && styles.msgRowUser]}>
+          {!isUser ? (
+            <View style={[styles.msgAvatar, { backgroundColor: accentColor.bg }]}>
+              <Bot size={14} color={accentColor.text} />
+            </View>
+          ) : null}
+          <View
+            style={[
+              styles.msgBubble,
+              isUser ? styles.userBubble : styles.aiBubble,
+              { maxWidth: maxBubbleWidth },
+            ]}
+          >
+            {isUser ? (
+              <LinearGradient
+                colors={[Colors.primary, Colors.accent]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={[StyleSheet.absoluteFill, { borderRadius: 20, borderBottomRightRadius: 6 }]}
+              />
+            ) : null}
+            <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
+            <Text style={[styles.msgTime, isUser && styles.userMsgTime]}>
+              {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </View>
+          {isUser ? (
+            <View style={styles.msgAvatarUser}>
+              <User size={14} color={Colors.textSecondary} />
+            </View>
+          ) : null}
         </View>
       );
-    }
-
-    return (
-      <View style={[styles.msgRow, isUser && styles.msgRowUser]}>
-        {!isUser && (
-          <View style={[styles.msgAvatar, { backgroundColor: accentColor.bg }]}>
-            <Bot size={14} color={accentColor.text} />
-          </View>
-        )}
-        <View style={[
-          styles.msgBubble,
-          isUser ? styles.userBubble : styles.aiBubble,
-          { maxWidth: maxBubbleWidth },
-        ]}>
-          {isUser && (
-            <LinearGradient
-              colors={[Colors.primary, Colors.accent]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={[StyleSheet.absoluteFill, { borderRadius: 20, borderBottomRightRadius: 6 }]}
-            />
-          )}
-          <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
-          <Text style={[styles.msgTime, isUser && styles.userMsgTime]}>
-            {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-          </Text>
-        </View>
-        {isUser && (
-          <View style={styles.msgAvatarUser}>
-            <User size={14} color={Colors.textSecondary} />
-          </View>
-        )}
-      </View>
-    );
-  }, [maxBubbleWidth, accentColor]);
+    },
+    [accentColor, maxBubbleWidth]
+  );
 
   return (
     <KeyboardAvoidingView
@@ -275,66 +530,95 @@ function ChatView({ agentId, agentName, messages, onSend, onClearChat, isTyping:
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 160 : 0}
     >
-      <FlatList
-        ref={flatListRef}
-        data={messages}
-        renderItem={renderMessage}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.chatList}
-        showsVerticalScrollIndicator={false}
-        ListEmptyComponent={
-          <View style={styles.chatEmpty}>
-            <View style={styles.chatEmptyIcon}>
-              <Sparkles size={32} color={Colors.primary} />
-            </View>
-            <Text style={styles.chatEmptyTitle}>Chat with {agentName}</Text>
-            <Text style={styles.chatEmptyText}>Send a message or try a suggestion below</Text>
-            {agentQuickActions.length > 0 && (
+      {usingRefetchFallback ? (
+        <View style={styles.liveState}>
+          <RefreshCw size={13} color={Colors.textMuted} />
+          <Text style={styles.liveStateText}>Refreshing chat every 3s</Text>
+        </View>
+      ) : null}
+
+      {isConversationLoading ? (
+        <View style={styles.chatLoading}>
+          <ActivityIndicator size="large" color={Colors.primary} />
+          <Text style={styles.chatLoadingTitle}>Loading conversation</Text>
+          <Text style={styles.chatLoadingText}>Pulling the latest history from OpenClaw.</Text>
+        </View>
+      ) : (
+        <FlatList
+          ref={flatListRef}
+          data={timeline}
+          renderItem={renderTimelineItem}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.chatList}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={
+            <View style={styles.chatEmpty}>
+              <View style={styles.chatEmptyIcon}>
+                <Sparkles size={32} color={Colors.primary} />
+              </View>
+              <Text style={styles.chatEmptyTitle}>Chat with {agent.name}</Text>
+              <Text style={styles.chatEmptyText}>Send a message or start with a coordinator prompt.</Text>
               <View style={styles.suggestionsWrap}>
-                {agentQuickActions.map((qa) => (
+                {suggestedPrompts.map((prompt) => (
                   <Pressable
-                    key={qa.id}
-                    style={styles.suggestionChip}
-                    onPress={() => {
-                      onSend(agentId, qa.command);
-                      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                    }}
+                    key={prompt}
+                    style={[styles.suggestionChip, isSending && styles.suggestionChipDisabled]}
+                    onPress={() => handleSubmit(prompt)}
+                    disabled={isSending}
                   >
-                    <Text style={styles.suggestionText}>{qa.label}</Text>
-                    <Text style={styles.suggestionDesc} numberOfLines={1}>{qa.description}</Text>
+                    <Text style={styles.suggestionText}>{prompt}</Text>
                   </Pressable>
                 ))}
               </View>
-            )}
-          </View>
-        }
-        ListHeaderComponent={
-          messages.length > 0 ? (
-            <Pressable style={styles.clearChatBtn} onPress={onClearChat} hitSlop={8}>
-              <Eraser size={14} color={Colors.textDim} />
-              <Text style={styles.clearChatText}>Clear chat</Text>
-            </Pressable>
-          ) : null
-        }
-        ListFooterComponent={typing ? <TypingIndicator /> : null}
-      />
+            </View>
+          }
+          ListHeaderComponent={
+            conversationError ? (
+              <View style={styles.errorBanner}>
+                <View style={styles.errorBannerTextWrap}>
+                  <Text style={styles.errorBannerTitle}>Conversation unavailable</Text>
+                  <Text style={styles.errorBannerText}>{conversationError}</Text>
+                </View>
+                <Pressable style={styles.retryBtn} onPress={onRetryConversation}>
+                  <Text style={styles.retryBtnText}>Retry</Text>
+                </Pressable>
+              </View>
+            ) : null
+          }
+          ListFooterComponent={isWaitingForReply ? <TypingIndicator /> : <View style={styles.chatBottomSpace} />}
+        />
+      )}
+
       <View style={styles.inputBar}>
         <TextInput
           style={styles.chatInput}
-          placeholder={`Message ${agentName}...`}
+          placeholder={`Message ${agent.name}...`}
           placeholderTextColor={Colors.textMuted}
           value={input}
           onChangeText={setInput}
           multiline
           maxLength={4000}
+          editable={!isSending}
           testID="chat-input"
         />
         <Pressable
-          style={[styles.sendBtn, !input.trim() && styles.sendBtnDisabled]}
-          onPress={handleSend}
-          disabled={!input.trim()}
+          style={[
+            styles.sendBtn,
+            !input.trim() && !isSending && styles.sendBtnDisabled,
+          ]}
+          onPress={() => handleSubmit(input)}
+          disabled={(!input.trim() && !isSending) || isSending}
         >
-          {input.trim() ? (
+          {isSending ? (
+            <LinearGradient
+              colors={[Colors.primary, Colors.accent]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.sendBtnGradient}
+            >
+              <ActivityIndicator color="#000" size="small" />
+            </LinearGradient>
+          ) : input.trim() ? (
             <LinearGradient
               colors={[Colors.primary, Colors.accent]}
               start={{ x: 0, y: 0 }}
@@ -352,185 +636,247 @@ function ChatView({ agentId, agentName, messages, onSend, onClearChat, isTyping:
   );
 }
 
-function ConfigView({ agent, onUpdate }: {
-  agent: Agent;
-  onUpdate: (agentId: string, updates: Partial<Agent>) => void;
+function NotFoundState({
+  router,
+  title,
+  subtitle,
+}: {
+  router: ReturnType<typeof useRouter>;
+  title: string;
+  subtitle: string;
 }) {
-  const [prompt, setPrompt] = useState(agent.systemPrompt);
-  const [showModelPicker, setShowModelPicker] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(agent.model);
-  const [hasChanges, setHasChanges] = useState(false);
-
-  const handleSavePrompt = useCallback(() => {
-    onUpdate(agent.id, { systemPrompt: prompt });
-    setHasChanges(false);
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  }, [agent.id, prompt, onUpdate]);
-
-  const handleSelectModel = useCallback((model: AIModel) => {
-    setSelectedModel(model.id);
-    onUpdate(agent.id, { model: model.id, provider: model.provider });
-    setShowModelPicker(false);
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-  }, [agent.id, onUpdate]);
-
-  const handlePromptChange = useCallback((text: string) => {
-    setPrompt(text);
-    setHasChanges(text !== agent.systemPrompt);
-  }, [agent.systemPrompt]);
-
   return (
-    <ScrollView style={styles.configContainer} contentContainerStyle={styles.configContent} showsVerticalScrollIndicator={false}>
-      <View style={styles.configSection}>
-        <View style={styles.configSectionHeader}>
-          <Cpu size={16} color={Colors.primary} />
-          <Text style={styles.configSectionTitle}>AI Model</Text>
-        </View>
-        <Pressable
-          style={styles.modelSelector}
-          onPress={() => setShowModelPicker(!showModelPicker)}
-        >
-          <Text style={styles.modelSelectedText}>{selectedModel}</Text>
-          <ChevronDown size={16} color={Colors.textMuted} />
-        </Pressable>
-
-        {showModelPicker && (
-          <View style={styles.modelList}>
-            {mockModels.map((model) => (
-              <Pressable
-                key={model.id}
-                style={[
-                  styles.modelOption,
-                  selectedModel === model.id && styles.modelOptionActive,
-                ]}
-                onPress={() => handleSelectModel(model)}
-              >
-                <View style={styles.modelOptionTop}>
-                  <Text style={styles.modelOptionName}>{model.name}</Text>
-                  <Text style={styles.modelOptionProvider}>{model.provider}</Text>
-                </View>
-                <Text style={styles.modelOptionDesc}>{model.description}</Text>
-                <View style={styles.modelCaps}>
-                  {model.capabilities.slice(0, 3).map((cap) => (
-                    <View key={cap} style={styles.capBadge}>
-                      <Text style={styles.capText}>{cap}</Text>
-                    </View>
-                  ))}
-                  <Text style={styles.modelCtx}>
-                    {(model.contextWindow / 1000).toFixed(0)}K context
-                  </Text>
-                </View>
-              </Pressable>
-            ))}
-          </View>
-        )}
-      </View>
-
-      <View style={styles.configSection}>
-        <View style={styles.configSectionHeader}>
-          <FileText size={16} color="#7C5CE7" />
-          <Text style={styles.configSectionTitle}>System Prompt</Text>
-        </View>
-        <TextInput
-          style={styles.promptInput}
-          multiline
-          value={prompt}
-          onChangeText={handlePromptChange}
-          placeholder="Enter instructions for this agent..."
-          placeholderTextColor={Colors.textMuted}
-          textAlignVertical="top"
-          testID="config-prompt"
-        />
-        <Pressable
-          style={[styles.savePromptBtn, !hasChanges && styles.savePromptBtnDisabled]}
-          onPress={handleSavePrompt}
-          disabled={!hasChanges}
-        >
-          {hasChanges ? (
-            <LinearGradient
-              colors={[Colors.primary, Colors.accent]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.savePromptGradient}
-            >
-              <Text style={styles.savePromptText}>Save Changes</Text>
-            </LinearGradient>
-          ) : (
-            <Text style={styles.savePromptTextDisabled}>No Changes</Text>
-          )}
-        </Pressable>
-      </View>
-
-      <View style={styles.configSection}>
-        <View style={styles.configSectionHeader}>
-          <FolderOpen size={16} color={Colors.accent} />
-          <Text style={styles.configSectionTitle}>Workspace</Text>
-        </View>
-        <View style={styles.workspaceCard}>
-          <Text style={styles.workspaceLabel}>Agent Directory</Text>
-          <Text style={styles.workspacePath}>{agent.agentDir}</Text>
-        </View>
-      </View>
-
-      <View style={{ height: 40 }} />
-    </ScrollView>
+    <View style={styles.errorContainer}>
+      <Stack.Screen options={{ title }} />
+      <AlertCircle size={48} color={Colors.error} />
+      <Text style={styles.errorTitle}>{title}</Text>
+      <Text style={styles.errorSubtext}>{subtitle}</Text>
+      <Pressable style={styles.goBackBtn} onPress={() => router.back()}>
+        <Text style={styles.goBackText}>Go Back</Text>
+      </Pressable>
+    </View>
   );
 }
 
-function ChannelsView({ channels }: { channels: ChannelBinding[] }) {
-  if (channels.length === 0) {
-    return (
-      <View style={styles.channelsEmpty}>
-        <Radio size={44} color={Colors.textDim} />
-        <Text style={styles.channelsEmptyText}>No channels connected</Text>
-        <Text style={styles.channelsEmptySubtext}>
-          Connect messaging channels through the OpenClaw CLI
-        </Text>
-      </View>
-    );
+function createEmptyConversation(agentId: string, agent?: Agent): ConversationViewModel {
+  return {
+    id: agent?.conversationId ?? `pending:${agentId}`,
+    agentId,
+    agentName: agent?.name,
+    messages: [],
+    events: [],
+    latestRun: agent?.lastRun ?? null,
+    nextCursor: null,
+  };
+}
+
+function createStreamingAssistantMessage({
+  id,
+  agentId,
+  conversationId,
+  runId,
+  timestamp,
+}: {
+  id: string;
+  agentId: string;
+  conversationId?: string | null;
+  runId?: string | null;
+  timestamp: string;
+}): ChatMessage {
+  return {
+    id,
+    agentId,
+    role: 'assistant',
+    content: '',
+    timestamp,
+    conversationId: conversationId ?? null,
+    runId: runId ?? null,
+    status: 'streaming',
+  };
+}
+
+function resolveConversationId(conversationId: string | null | undefined) {
+  if (!conversationId || conversationId.startsWith('pending:')) {
+    return null;
   }
 
-  return (
-    <ScrollView style={styles.channelsContainer} contentContainerStyle={styles.channelsContent} showsVerticalScrollIndicator={false}>
-      {channels.map((ch) => (
-        <View key={ch.id} style={styles.channelCard}>
-          <View style={styles.channelCardTop}>
-            <ChannelIcon type={ch.type} size={18} />
-            <View style={styles.channelInfo}>
-              <Text style={styles.channelCardLabel}>{ch.label}</Text>
-              <Text style={styles.channelType}>{ch.type}</Text>
-            </View>
-            <View style={[
-              styles.connBadge,
-              { backgroundColor: ch.connected ? Colors.successGlow : Colors.errorGlow },
-              { borderColor: ch.connected ? 'rgba(34, 221, 136, 0.15)' : 'rgba(255, 85, 102, 0.15)' },
-            ]}>
-              <View style={[
-                styles.connBadgeDot,
-                { backgroundColor: ch.connected ? Colors.success : Colors.error },
-              ]} />
-              <Text style={[
-                styles.connBadgeText,
-                { color: ch.connected ? Colors.success : Colors.error },
-              ]}>
-                {ch.connected ? 'Connected' : 'Disconnected'}
-              </Text>
-            </View>
-          </View>
-          <View style={styles.channelIdentifier}>
-            <Text style={styles.identifierLabel}>Identifier</Text>
-            <Text style={styles.identifierValue}>{ch.identifier}</Text>
-          </View>
-        </View>
-      ))}
-    </ScrollView>
-  );
+  return conversationId;
+}
+
+function toTimelineEventMessage(event: EventPayload, fallbackAgentId: string): ChatMessage | null {
+  if (event.type === 'delegation') {
+    const payload = event.payload as {
+      fromAgentId?: unknown;
+      fromAgentName?: unknown;
+      toAgentId?: unknown;
+      toAgentName?: unknown;
+      summary?: unknown;
+    };
+
+    return {
+      id: `event:${event.id}`,
+      agentId: event.agentId ?? fallbackAgentId,
+      role: 'event',
+      content: '',
+      timestamp: event.createdAt,
+      conversationId: event.conversationId ?? null,
+      runId: event.runId ?? null,
+      status: 'complete',
+      metadata: {
+        type: 'delegation',
+        fromAgentId: typeof payload.fromAgentId === 'string' ? payload.fromAgentId : undefined,
+        fromAgentName: typeof payload.fromAgentName === 'string' ? payload.fromAgentName : undefined,
+        toAgentId: typeof payload.toAgentId === 'string' ? payload.toAgentId : undefined,
+        toAgentName: typeof payload.toAgentName === 'string' ? payload.toAgentName : undefined,
+        summary: typeof payload.summary === 'string' ? payload.summary : undefined,
+      },
+    };
+  }
+
+  if (event.type === 'tool.started' || event.type === 'tool.completed') {
+    const payload = event.payload as { toolName?: unknown };
+
+    return {
+      id: `event:${event.id}`,
+      agentId: event.agentId ?? fallbackAgentId,
+      role: 'tool',
+      content: '',
+      timestamp: event.createdAt,
+      conversationId: event.conversationId ?? null,
+      runId: event.runId ?? null,
+      status: event.type === 'tool.completed' ? 'complete' : 'streaming',
+      metadata: {
+        type: 'tool',
+        phase: event.type === 'tool.completed' ? 'completed' : 'started',
+        toolName: typeof payload.toolName === 'string' ? payload.toolName : 'tool',
+      },
+    };
+  }
+
+  return null;
+}
+
+function isDelegationMessage(message: ChatMessage) {
+  return message.role === 'event' || message.metadata?.type === 'delegation';
+}
+
+function isToolMessage(message: ChatMessage) {
+  return message.role === 'tool' || message.metadata?.type === 'tool';
+}
+
+function mergeMessages(messages: ChatMessage[]) {
+  const byId = new Map<string, ChatMessage>();
+
+  for (const message of messages) {
+    const existing = byId.get(message.id);
+
+    if (!existing) {
+      byId.set(message.id, message);
+      continue;
+    }
+
+    byId.set(message.id, preferRicherMessage(existing, message));
+  }
+
+  return [...byId.values()].sort((left, right) => {
+    const leftTime = new Date(left.timestamp).getTime();
+    const rightTime = new Date(right.timestamp).getTime();
+
+    if (leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+
+    return left.id.localeCompare(right.id);
+  });
+}
+
+function preferRicherMessage(current: ChatMessage, next: ChatMessage) {
+  const currentScore = getMessageScore(current);
+  const nextScore = getMessageScore(next);
+
+  if (nextScore > currentScore) {
+    return next;
+  }
+
+  if (nextScore < currentScore) {
+    return current;
+  }
+
+  return {
+    ...current,
+    ...next,
+    metadata: next.metadata ?? current.metadata,
+  };
+}
+
+function getMessageScore(message: ChatMessage) {
+  let score = message.content.length;
+
+  if (message.status === 'complete') {
+    score += 1_000;
+  } else if (message.status === 'streaming') {
+    score += 500;
+  }
+
+  if (message.metadata) {
+    score += 100;
+  }
+
+  return score;
+}
+
+function mergeEvents(events: EventPayload[]) {
+  const byId = new Map<string, EventPayload>();
+
+  for (const event of events) {
+    byId.set(event.id, event);
+  }
+
+  return [...byId.values()].sort((left, right) => {
+    const leftTime = new Date(left.createdAt).getTime();
+    const rightTime = new Date(right.createdAt).getTime();
+    return leftTime - rightTime;
+  });
+}
+
+function getSuggestedPrompts(agent: Agent) {
+  if (agent.isCoordinator || agent.role === 'coordinator') {
+    return [
+      'Give me a quick system status summary.',
+      'Which agents need operator attention right now?',
+      'What did you delegate most recently?',
+    ];
+  }
+
+  return [
+    `Summarize ${agent.name}'s latest work.`,
+    'What are you handling right now?',
+    'Do you need operator intervention?',
+  ];
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: Colors.background,
+  },
+  loadingScreen: {
+    flex: 1,
+    backgroundColor: Colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 28,
+  },
+  loadingTitle: {
+    color: Colors.text,
+    fontSize: 18,
+    fontWeight: '700' as const,
+  },
+  loadingSubtitle: {
+    color: Colors.textMuted,
+    fontSize: 14,
+    textAlign: 'center',
   },
   errorContainer: {
     flex: 1,
@@ -562,9 +908,6 @@ const styles = StyleSheet.create({
     color: Colors.primary,
     fontSize: 15,
     fontWeight: '700' as const,
-  },
-  headerDeleteBtn: {
-    padding: 8,
   },
   agentHeader: {
     flexDirection: 'row',
@@ -611,43 +954,51 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600' as const,
   },
-  tabRow: {
+  chatContainer: {
+    flex: 1,
+  },
+  liveState: {
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
     marginHorizontal: 20,
+    marginBottom: 6,
     backgroundColor: Colors.surface,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: Colors.cardBorder,
-    padding: 4,
-    marginBottom: 6,
   },
-  tabBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    borderRadius: 11,
-  },
-  tabBtnActive: {
-    backgroundColor: Colors.primaryGlow,
-  },
-  tabBtnText: {
+  liveStateText: {
     color: Colors.textMuted,
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '600' as const,
   },
-  tabBtnTextActive: {
-    color: Colors.primary,
-  },
-  chatContainer: {
+  chatLoading: {
     flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 28,
+  },
+  chatLoadingTitle: {
+    color: Colors.text,
+    fontSize: 18,
+    fontWeight: '700' as const,
+  },
+  chatLoadingText: {
+    color: Colors.textMuted,
+    fontSize: 14,
+    textAlign: 'center',
   },
   chatList: {
     padding: 20,
     paddingBottom: 10,
     flexGrow: 1,
+  },
+  chatBottomSpace: {
+    height: 14,
   },
   chatEmpty: {
     alignItems: 'center',
@@ -675,18 +1026,43 @@ const styles = StyleSheet.create({
   chatEmptyText: {
     color: Colors.textMuted,
     fontSize: 14,
+    textAlign: 'center',
   },
-  clearChatBtn: {
+  errorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 8,
-    marginBottom: 10,
+    gap: 12,
+    marginBottom: 16,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: Colors.errorGlow,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 85, 102, 0.18)',
   },
-  clearChatText: {
-    color: Colors.textDim,
-    fontSize: 13,
+  errorBannerTextWrap: {
+    flex: 1,
+    gap: 4,
+  },
+  errorBannerTitle: {
+    color: Colors.error,
+    fontSize: 14,
+    fontWeight: '700' as const,
+  },
+  errorBannerText: {
+    color: Colors.textSecondary,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  retryBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: Colors.surface,
+  },
+  retryBtnText: {
+    color: Colors.text,
+    fontSize: 12,
+    fontWeight: '700' as const,
   },
   systemMsg: {
     flexDirection: 'row',
@@ -801,241 +1177,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  configContainer: {
-    flex: 1,
-  },
-  configContent: {
-    padding: 20,
-    paddingBottom: 32,
-  },
-  configSection: {
-    marginBottom: 28,
-  },
-  configSectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 12,
-  },
-  configSectionTitle: {
-    color: Colors.text,
-    fontSize: 17,
-    fontWeight: '700' as const,
-    letterSpacing: -0.2,
-  },
-  modelSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: Colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    padding: 16,
-  },
-  modelSelectedText: {
-    color: Colors.text,
-    fontSize: 15,
-    fontWeight: '600' as const,
-  },
-  modelList: {
-    marginTop: 10,
-    gap: 8,
-  },
-  modelOption: {
-    backgroundColor: Colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    padding: 16,
-  },
-  modelOptionActive: {
-    borderColor: Colors.primary,
-    backgroundColor: Colors.primaryGlow,
-  },
-  modelOptionTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  modelOptionName: {
-    color: Colors.text,
-    fontSize: 15,
-    fontWeight: '700' as const,
-  },
-  modelOptionProvider: {
-    color: Colors.textSecondary,
-    fontSize: 13,
-  },
-  modelOptionDesc: {
-    color: Colors.textSecondary,
-    fontSize: 13,
-    marginBottom: 10,
-    lineHeight: 18,
-  },
-  modelCaps: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    alignItems: 'center',
-  },
-  capBadge: {
-    backgroundColor: Colors.surfaceLight,
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  capText: {
-    color: Colors.textSecondary,
-    fontSize: 11,
-    fontWeight: '600' as const,
-  },
-  modelCtx: {
-    color: Colors.textDim,
-    fontSize: 11,
-    marginLeft: 4,
-  },
-  promptInput: {
-    backgroundColor: Colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    color: Colors.text,
-    fontSize: 14,
-    padding: 16,
-    minHeight: 150,
-    lineHeight: 22,
-  },
-  savePromptBtn: {
-    borderRadius: 14,
-    overflow: 'hidden',
-    marginTop: 12,
-    backgroundColor: Colors.surfaceLight,
-    alignItems: 'center',
-    paddingVertical: 14,
-  },
-  savePromptBtnDisabled: {},
-  savePromptGradient: {
-    width: '100%',
-    alignItems: 'center',
-    paddingVertical: 14,
-    borderRadius: 14,
-  },
-  savePromptText: {
-    color: '#000',
-    fontSize: 15,
-    fontWeight: '700' as const,
-  },
-  savePromptTextDisabled: {
-    color: Colors.textDim,
-    fontSize: 15,
-    fontWeight: '600' as const,
-  },
-  workspaceCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    padding: 16,
-  },
-  workspaceLabel: {
-    color: Colors.textMuted,
-    fontSize: 12,
-    fontWeight: '600' as const,
-    marginBottom: 6,
-  },
-  workspacePath: {
-    color: Colors.primary,
-    fontSize: 14,
-    fontWeight: '600' as const,
-  },
-  channelsContainer: {
-    flex: 1,
-  },
-  channelsContent: {
-    padding: 20,
-    paddingBottom: 32,
-  },
-  channelsEmpty: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    padding: 40,
-  },
-  channelsEmptyText: {
-    color: Colors.text,
-    fontSize: 17,
-    fontWeight: '600' as const,
-  },
-  channelsEmptySubtext: {
-    color: Colors.textMuted,
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  channelCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: Colors.cardBorder,
-    padding: 16,
-    marginBottom: 10,
-  },
-  channelCardTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  channelInfo: {
-    flex: 1,
-  },
-  channelCardLabel: {
-    color: Colors.text,
-    fontSize: 15,
-    fontWeight: '600' as const,
-  },
-  channelType: {
-    color: Colors.textMuted,
-    fontSize: 12,
-    textTransform: 'capitalize' as const,
-    marginTop: 2,
-  },
-  connBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 10,
-    borderWidth: 1,
-  },
-  connBadgeDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  connBadgeText: {
-    fontSize: 12,
-    fontWeight: '600' as const,
-  },
-  channelIdentifier: {
-    marginTop: 12,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: Colors.cardBorder,
-  },
-  identifierLabel: {
-    color: Colors.textMuted,
-    fontSize: 12,
-    fontWeight: '600' as const,
-    marginBottom: 4,
-  },
-  identifierValue: {
-    color: Colors.textSecondary,
-    fontSize: 14,
-  },
   suggestionsWrap: {
     marginTop: 24,
     width: '100%',
@@ -1047,17 +1188,15 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: Colors.cardBorder,
-    padding: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 16,
+  },
+  suggestionChipDisabled: {
+    opacity: 0.6,
   },
   suggestionText: {
     color: Colors.primary,
     fontSize: 15,
     fontWeight: '600' as const,
-    marginBottom: 3,
-  },
-  suggestionDesc: {
-    color: Colors.textMuted,
-    fontSize: 13,
-    lineHeight: 18,
   },
 });
