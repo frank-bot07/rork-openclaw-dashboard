@@ -18,6 +18,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { AlertCircle, Bot, RefreshCw, Send, Sparkles, User } from 'lucide-react-native';
 import DelegationEvent from '@/components/DelegationEvent';
+import ErrorStateCard from '@/components/ErrorStateCard';
+import { ConversationSkeleton } from '@/components/SkeletonLoader';
 import StatusDot from '@/components/StatusDot';
 import ToolEvent from '@/components/ToolEvent';
 import TypingIndicator from '@/components/TypingIndicator';
@@ -538,11 +540,7 @@ function ChatView({
       ) : null}
 
       {isConversationLoading ? (
-        <View style={styles.chatLoading}>
-          <ActivityIndicator size="large" color={Colors.primary} />
-          <Text style={styles.chatLoadingTitle}>Loading conversation</Text>
-          <Text style={styles.chatLoadingText}>Pulling the latest history from OpenClaw.</Text>
-        </View>
+        <ConversationSkeleton style={styles.chatLoading} />
       ) : (
         <FlatList
           ref={flatListRef}
@@ -574,15 +572,12 @@ function ChatView({
           }
           ListHeaderComponent={
             conversationError ? (
-              <View style={styles.errorBanner}>
-                <View style={styles.errorBannerTextWrap}>
-                  <Text style={styles.errorBannerTitle}>Conversation unavailable</Text>
-                  <Text style={styles.errorBannerText}>{conversationError}</Text>
-                </View>
-                <Pressable style={styles.retryBtn} onPress={onRetryConversation}>
-                  <Text style={styles.retryBtnText}>Retry</Text>
-                </Pressable>
-              </View>
+              <ErrorStateCard
+                style={styles.errorBanner}
+                title="Conversation unavailable"
+                message={conversationError}
+                onRetry={onRetryConversation}
+              />
             ) : null
           }
           ListFooterComponent={isWaitingForReply ? <TypingIndicator /> : <View style={styles.chatBottomSpace} />}

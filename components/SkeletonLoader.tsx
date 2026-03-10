@@ -9,6 +9,10 @@ interface SkeletonProps {
   style?: StyleProp<ViewStyle>;
 }
 
+interface SkeletonGroupProps {
+  style?: StyleProp<ViewStyle>;
+}
+
 export function SkeletonBlock({ width, height, borderRadius = 8, style }: SkeletonProps) {
   const shimmerAnim = useRef(new Animated.Value(0.25)).current;
 
@@ -39,9 +43,9 @@ export function SkeletonBlock({ width, height, borderRadius = 8, style }: Skelet
   );
 }
 
-export function DashboardSkeleton() {
+export function DashboardSkeleton({ style }: SkeletonGroupProps) {
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, style]}>
       <SkeletonBlock width="100%" height={76} borderRadius={16} style={styles.mb16} />
       <SkeletonBlock width="100%" height={56} borderRadius={14} style={styles.mb20} />
 
@@ -61,9 +65,9 @@ export function DashboardSkeleton() {
   );
 }
 
-export function AgentListSkeleton() {
+export function AgentListSkeleton({ style }: SkeletonGroupProps) {
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, style]}>
       {[1, 2, 3, 4].map((i) => (
         <View key={i} style={styles.agentSkeletonCard}>
           <View style={styles.agentSkeletonTop}>
@@ -84,9 +88,9 @@ export function AgentListSkeleton() {
   );
 }
 
-export function SchedulerSkeleton() {
+export function SchedulerSkeleton({ style }: SkeletonGroupProps) {
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, style]}>
       {[1, 2, 3, 4, 5].map((i) => (
         <View key={i} style={styles.schedulerSkeletonCard}>
           <View style={styles.schedulerSkeletonRow}>
@@ -99,6 +103,29 @@ export function SchedulerSkeleton() {
           </View>
         </View>
       ))}
+    </View>
+  );
+}
+
+export function ConversationSkeleton({ style }: SkeletonGroupProps) {
+  return (
+    <View style={[styles.container, style]}>
+      <View style={styles.chatSkeletonRow}>
+        <SkeletonBlock width={30} height={30} borderRadius={10} />
+        <SkeletonBlock width="58%" height={78} borderRadius={18} />
+      </View>
+      <View style={[styles.chatSkeletonRow, styles.chatSkeletonRowRight]}>
+        <SkeletonBlock width="64%" height={66} borderRadius={18} />
+        <SkeletonBlock width={30} height={30} borderRadius={10} />
+      </View>
+      <View style={styles.chatSkeletonRow}>
+        <SkeletonBlock width={30} height={30} borderRadius={10} />
+        <SkeletonBlock width="72%" height={94} borderRadius={18} />
+      </View>
+      <View style={styles.chatSkeletonComposer}>
+        <SkeletonBlock width="100%" height={54} borderRadius={22} />
+        <SkeletonBlock width={44} height={44} borderRadius={22} />
+      </View>
     </View>
   );
 }
@@ -166,5 +193,20 @@ const styles = StyleSheet.create({
   },
   schedulerSkeletonMeta: {
     flex: 1,
+  },
+  chatSkeletonRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 10,
+    marginBottom: 18,
+  },
+  chatSkeletonRowRight: {
+    justifyContent: 'flex-end',
+  },
+  chatSkeletonComposer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 20,
   },
 });

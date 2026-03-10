@@ -10,6 +10,8 @@ import Colors from '@/constants/colors';
 import { useOpenClaw } from '@/providers/OpenClawProvider';
 import { Agent, AgentStatus } from '@/types/openclaw';
 import FloatingChatButton from '@/components/FloatingChatButton';
+import ErrorStateCard from '@/components/ErrorStateCard';
+import { AgentListSkeleton } from '@/components/SkeletonLoader';
 import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
 import StatusDot from '@/components/StatusDot';
 import PressableCard from '@/components/PressableCard';
@@ -90,7 +92,7 @@ function AnimatedAgentCard({ agent, index, onPress }: { agent: Agent; index: num
 }
 
 export default function AgentsScreen() {
-  const { client, agents, isRefreshing, refreshData } = useOpenClaw();
+  const { client, agents, isRefreshing, isAgentsLoading, agentsError, refreshData, retryAgents } = useOpenClaw();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const search = useUIStore((state) => state.agentSearchQuery);
@@ -186,6 +188,19 @@ export default function AgentsScreen() {
           />
         }
       >
+        {isAgentsLoading && filteredAgents.length === 0 ? (
+          <AgentListSkeleton />
+        ) : null}
+
+        {agentsError && filteredAgents.length === 0 ? (
+          <ErrorStateCard
+            style={styles.errorCard}
+            title="Agents unavailable"
+            message={agentsError.message}
+            onRetry={() => void retryAgents()}
+          />
+        ) : null}
+
         {filteredAgents.map((agent, index) => (
           <AnimatedAgentCard
             key={agent.id}
@@ -415,5 +430,8 @@ const styles = StyleSheet.create({
   emptySubtext: {
     color: Colors.textMuted,
     fontSize: 14,
+  },
+  errorCard: {
+    marginBottom: 16,
   },
 });

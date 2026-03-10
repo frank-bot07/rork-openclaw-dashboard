@@ -1,5 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
+import { Alert } from 'react-native';
+import { useSessionStore } from '@/stores/sessionStore';
 import type { ConnectionState, GatewayCapabilities, Session } from '@/types/openclaw';
 
 const SESSION_TOKENS_KEY = 'openclaw.session.tokens';
@@ -9,6 +11,9 @@ const SECURE_STORE_OPTIONS: SecureStore.SecureStoreOptions = {
   keychainService: 'openclaw.mobile',
   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
 };
+const SESSION_EXPIRED_TITLE = 'Session expired';
+const SESSION_EXPIRED_MESSAGE = 'Session expired. Please reconnect.';
+let expiringSessionPromise: Promise<void> | null = null;
 
 export const DEFAULT_GATEWAY_CAPABILITIES: GatewayCapabilities = {
   canReadOverview: false,
@@ -167,6 +172,28 @@ export const openClawAuth = {
       this.clearTokens(),
       AsyncStorage.removeItem(SESSION_METADATA_KEY),
     ]);
+  },
+
+  async expireSession(reason = SESSION_EXPIRED_MESSAGE) {
+    if (expiringSessionPromise) {
+      return expiringSessionPromise;
+    }
+
+    expiringSessionPromise = (async () => {
+      const store = useSessionStore.getState();
+      const shouldNotify = store.connectionState !== 'unauthorized';
+
+      await this.clearSession();
+      useSessionStore.getState().setUnauthorized(reason);
+
+      if (shouldNotify) {
+        Alert.alert(SESSION_EXPIRED_TITLE, SESSION_EXPIRED_MESSAGE);
+      }
+    })().finally(() => {
+      expiringSessionPromise = null;
+    });
+
+    return expiringSessionPromise;
   },
 
   async logout() {

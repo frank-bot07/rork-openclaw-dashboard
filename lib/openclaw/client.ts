@@ -22,7 +22,7 @@ type QueryValue =
   | boolean
   | null
   | undefined
-  | Array<string | number | boolean>;
+  | (string | number | boolean)[];
 
 type AuthTokenResolver = () => Promise<string | null | undefined> | string | null | undefined;
 
@@ -194,7 +194,13 @@ export class OpenClawClient {
 
         clearTimeout(timeoutId);
         if (!response.ok) {
-          throw await toClientError(response);
+          const clientError = await toClientError(response);
+
+          if (clientError.status === 401 || clientError.status === 403) {
+            await openClawAuth.expireSession(clientError.message || 'Session expired. Please reconnect.');
+          }
+
+          throw clientError;
         }
 
         if (response.status === 204) {

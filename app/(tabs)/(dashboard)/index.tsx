@@ -11,6 +11,8 @@ import { useOverview } from '@/hooks/useOverview';
 import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
 import StatusDot from '@/components/StatusDot';
 import FloatingChatButton from '@/components/FloatingChatButton';
+import ErrorStateCard from '@/components/ErrorStateCard';
+import { DashboardSkeleton } from '@/components/SkeletonLoader';
 import { useSessionStore } from '@/stores/sessionStore';
 
 export default function DashboardScreen() {
@@ -100,12 +102,16 @@ export default function DashboardScreen() {
             </View>
           </View>
 
-          {isOverviewLoading && (
-            <View style={styles.connectingCard}>
-              <Text style={styles.connectingTitle}>Connecting...</Text>
-              <Text style={styles.connectingText}>Fetching gateway health and coordinator state.</Text>
-            </View>
-          )}
+          {isOverviewLoading ? (
+            <DashboardSkeleton style={styles.connectingCard} />
+          ) : overview.error && !overview.data ? (
+            <ErrorStateCard
+              style={styles.connectingCard}
+              title="Overview unavailable"
+              message={overview.error instanceof Error ? overview.error.message : 'Unable to load gateway overview.'}
+              onRetry={() => void overview.refetch()}
+            />
+          ) : null}
 
           {primaryAgent && (
             <Pressable
