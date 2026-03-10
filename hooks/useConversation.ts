@@ -9,6 +9,9 @@ import { mapConversation, mapConversationMessage } from '@/lib/openclaw/mappers'
 import { useSessionStore } from '@/stores/sessionStore';
 import type { ChatMessage, ConversationViewModel } from '@/types/openclaw';
 
+const CONVERSATION_QUERY_GC_TIME = 10 * 60 * 1000;
+const MAX_MESSAGE_CONTENT_LENGTH = 4_000;
+
 export function useConversation(client: OpenClawClient | null, agentId: string | undefined) {
   const connectionState = useSessionStore((s) => s.connectionState);
 
@@ -36,6 +39,7 @@ export function useConversation(client: OpenClawClient | null, agentId: string |
       }
     },
     enabled: !!client && !!agentId && connectionState === 'connected',
+    gcTime: CONVERSATION_QUERY_GC_TIME,
     staleTime: 5_000,
     retry: 2,
   });
@@ -59,19 +63,28 @@ export function useSendMessage(client: OpenClawClient | null) {
       metadata?: Record<string, unknown>;
     }) => {
       if (!client) throw new Error('No client');
-      return client.sendMessage({ agentId, conversationId: conversationId ?? undefined, content, metadata });
+      const normalizedContent = normalizeOutgoingMessageContent(content);
+      return client.sendMessage({
+        agentId,
+        conversationId: conversationId ?? undefined,
+        content: normalizedContent,
+        metadata,
+      });
     },
     onMutate: async (variables) => {
+      const normalizedContent = normalizeOutgoingMessageContent(variables.content);
       const conversationKey = queryKeys.conversations.byAgent(variables.agentId);
       const mutationId = createMutationId();
       const optimisticTimestamp = new Date().toISOString();
+
+      variables.content = normalizedContent;
       await queryClient.cancelQueries({ queryKey: conversationKey });
 
       const optimisticMessage: ChatMessage = {
         id: `optimistic:${mutationId}`,
         agentId: variables.agentId,
         role: 'user',
-        content: variables.content,
+        content: normalizedContent,
         timestamp: optimisticTimestamp,
         conversationId: variables.conversationId ?? queryClient.getQueryData<ConversationViewModel>(conversationKey)?.id ?? null,
         status: 'pending',
@@ -151,6 +164,20 @@ export function useSendMessage(client: OpenClawClient | null) {
 
 function createMutationId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeOutgoingMessageContent(content: string) {
+  const trimmed = content.trim();
+
+  if (!trimmed) {
+    throw new Error('Enter a message before sending.');
+  }
+
+  if (trimmed.length > MAX_MESSAGE_CONTENT_LENGTH) {
+    throw new Error(`Messages must be ${MAX_MESSAGE_CONTENT_LENGTH} characters or fewer.`);
+  }
+
+  return trimmed;
 }
 
 function mergeMessages(messages: ChatMessage[]) {

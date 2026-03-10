@@ -19,6 +19,7 @@ export function useAgentDetail(client: OpenClawClient | null, agentId: string | 
       return mapAgentDetail(raw);
     },
     enabled: !!client && !!agentId && connectionState === 'connected',
+    gcTime: 10 * 60 * 1000,
     staleTime: 10_000,
     retry: 2,
   });

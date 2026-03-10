@@ -18,6 +18,7 @@ export function useOverview(client: OpenClawClient | null) {
       return mapGatewayOverview(raw);
     },
     enabled: !!client && connectionState === 'connected',
+    gcTime: 5 * 60 * 1000,
     staleTime: 15_000,
     refetchInterval: 30_000,
     retry: 2,

@@ -68,12 +68,14 @@ export const useSessionStore = create<SessionState>((set) => ({
     })),
 
   setDisconnected: (error?: string) =>
-    set({
+    set((state) => ({
       connectionState: 'disconnected',
-      gatewayUrl: null,
-      session: null,
+      gatewayUrl: state.gatewayUrl ?? state.session?.gatewayUrl ?? null,
+      session: state.session
+        ? { ...state.session, connectionState: 'disconnected' }
+        : state.session,
       lastError: error ?? null,
-    }),
+    })),
 
   setUnauthorized: (reason?: string) =>
     set((state) => ({

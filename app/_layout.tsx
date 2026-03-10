@@ -26,9 +26,8 @@ function RootLayoutNav() {
   const restoreSession = useSessionStore((state) => state.restoreSession);
   const clearSession = useSessionStore((state) => state.clearSession);
   const setConnected = useSessionStore((state) => state.setConnected);
-  const setDisconnected = useSessionStore((state) => state.setDisconnected);
+  const setOffline = useSessionStore((state) => state.setOffline);
   const session = useSessionStore((state) => state.session);
-  const connectionState = useSessionStore((state) => state.connectionState);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [bootstrapError, setBootstrapError] = useState<Error | null>(null);
 
@@ -76,10 +75,11 @@ function RootLayoutNav() {
             }
 
             if (isUnauthorizedConnectionError(error) || useSessionStore.getState().connectionState === 'unauthorized') {
+              clearSession();
               return;
             }
 
-            setDisconnected(toConnectionErrorMessage(error));
+            setOffline(toConnectionErrorMessage(error));
           }
         } else {
           clearSession();
@@ -109,7 +109,7 @@ function RootLayoutNav() {
     return () => {
       isMounted = false;
     };
-  }, [clearSession, restoreSession, setConnected, setDisconnected]);
+  }, [clearSession, restoreSession, setConnected, setOffline]);
 
   if (bootstrapError) {
     throw bootstrapError;
@@ -122,18 +122,17 @@ function RootLayoutNav() {
 
     const currentRoute = segments[0];
     const isConnectRoute = currentRoute === 'connect';
-    const hasAuthorizedSession =
-      Boolean(session) && connectionState !== 'unauthorized' && connectionState !== 'disconnected';
+    const hasStoredSession = Boolean(session);
 
-    if (!hasAuthorizedSession && !isConnectRoute) {
+    if (!hasStoredSession && !isConnectRoute) {
       router.replace('/connect');
       return;
     }
 
-    if (hasAuthorizedSession && isConnectRoute) {
+    if (hasStoredSession && isConnectRoute) {
       router.replace('/(tabs)');
     }
-  }, [connectionState, isBootstrapping, rootNavigationState?.key, router, segments, session]);
+  }, [isBootstrapping, rootNavigationState?.key, router, segments, session]);
 
   if (isBootstrapping) {
     return null;

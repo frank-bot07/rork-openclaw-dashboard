@@ -28,6 +28,7 @@ export function useAgents(client: OpenClawClient | null, filters?: AgentFilters)
       return raw.items.map(mapAgentSummary);
     },
     enabled: !!client && connectionState === 'connected',
+    gcTime: 5 * 60 * 1000,
     staleTime: 10_000,
     refetchInterval: 30_000,
     retry: 2,

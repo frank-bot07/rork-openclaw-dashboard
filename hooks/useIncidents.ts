@@ -21,6 +21,7 @@ export function useIncidents(client: OpenClawClient | null, filters?: IncidentFi
       return raw.items.map(mapIncident);
     },
     enabled: !!client && connectionState === 'connected',
+    gcTime: 5 * 60 * 1000,
     staleTime: 15_000,
     refetchInterval: 60_000,
     retry: 2,
