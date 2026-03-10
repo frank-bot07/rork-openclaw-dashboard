@@ -110,7 +110,15 @@ export function buildSessionFromOverview(
 }
 
 export function isUnauthorizedConnectionError(error: unknown) {
-  return error instanceof OpenClawClientError && (error.status === 401 || error.status === 403);
+  return (
+    error instanceof OpenClawClientError &&
+    (error.status === 401 ||
+      error.status === 403 ||
+      error.code === 'AUTH_TOKEN_MISMATCH' ||
+      error.code === 'AUTH_RATE_LIMITED' ||
+      error.code === 'AUTH_UNAUTHORIZED' ||
+      error.code === 'AUTH_TOKEN_MISSING')
+  );
 }
 
 export function toConnectionErrorMessage(error: unknown) {
@@ -121,6 +129,14 @@ export function toConnectionErrorMessage(error: unknown) {
   if (error instanceof OpenClawClientError) {
     if (error.code === 'REQUEST_TIMEOUT') {
       return 'The gateway did not respond in time. Verify the URL and network access.';
+    }
+
+    if (error.code === 'WS_UNAVAILABLE') {
+      return 'WebSocket is unavailable in this runtime.';
+    }
+
+    if (error.code === 'WS_ERROR' || error.code === 'WS_ABNORMAL_CLOSE' || error.code === 'WS_CLOSED') {
+      return 'Unable to keep a live WebSocket connection to the gateway.';
     }
 
     if (typeof error.status === 'number' && error.status >= 500) {

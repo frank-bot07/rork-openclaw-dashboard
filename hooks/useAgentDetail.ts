@@ -1,15 +1,48 @@
-/**
- * Hook: fetch detailed agent info (status, runs, allowed actions).
- */
+import { useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { queryKeys } from '@/lib/openclaw/queryKeys';
-import { safeInvalidateMany } from '@/lib/openclaw/queryUtils';
 import { OpenClawClient } from '@/lib/openclaw/client';
 import { mapAgentDetail } from '@/lib/openclaw/mappers';
-import { useSessionStore } from '@/stores/sessionStore';
+import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { safeInvalidateMany } from '@/lib/openclaw/queryUtils';
 
 export function useAgentDetail(client: OpenClawClient | null, agentId: string | undefined) {
-  const connectionState = useSessionStore((s) => s.connectionState);
+  const queryClient = useQueryClient();
+  const initialAgent = agentId && client?.hasSnapshot() ? client.peekAgent(agentId) : null;
+
+  useEffect(() => {
+    if (!client || !agentId) {
+      return;
+    }
+
+    const syncAgentDetail = async () => {
+      try {
+        const raw = await client.getAgent(agentId);
+        queryClient.setQueryData(queryKeys.agents.detail(agentId), mapAgentDetail(raw));
+      } catch (error) {
+        if (error instanceof Error) {
+          console.error('[AgentDetail] Failed to sync agent detail cache.', error);
+        }
+      }
+    };
+
+    void syncAgentDetail();
+
+    const unsubscribePush = client.subscribeToPushEvents((event) => {
+      if (event.event === 'presence' || event.event === 'agent' || event.event === 'cron' || event.event === 'chat') {
+        void syncAgentDetail();
+      }
+    });
+    const unsubscribeConnection = client.subscribeToConnectionState((state) => {
+      if (state === 'connected') {
+        void syncAgentDetail();
+      }
+    });
+
+    return () => {
+      unsubscribePush();
+      unsubscribeConnection();
+    };
+  }, [agentId, client, queryClient]);
 
   return useQuery({
     queryKey: queryKeys.agents.detail(agentId ?? ''),
@@ -18,10 +51,19 @@ export function useAgentDetail(client: OpenClawClient | null, agentId: string | 
       const raw = await client.getAgent(agentId);
       return mapAgentDetail(raw);
     },
-    enabled: !!client && !!agentId && connectionState === 'connected',
+    initialData:
+      initialAgent && agentId
+        ? mapAgentDetail({
+            ...initialAgent,
+            recentRuns: client?.peekRuns({ agentId }).items ?? [],
+            incidents: client?.peekIncidents({ agentId }).items ?? [],
+            systemPrompt: '',
+          })
+        : undefined,
+    enabled: !!client && !!agentId,
     gcTime: 10 * 60 * 1000,
-    staleTime: 10_000,
-    retry: 2,
+    staleTime: Infinity,
+    retry: 1,
   });
 }
 

@@ -1,11 +1,8 @@
-/**
- * Hook: fetch agent list with optional search/status filters.
- */
-import { useQuery } from '@tanstack/react-query';
-import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { useEffect, useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { OpenClawClient } from '@/lib/openclaw/client';
 import { mapAgentSummary } from '@/lib/openclaw/mappers';
-import { useSessionStore } from '@/stores/sessionStore';
+import { queryKeys } from '@/lib/openclaw/queryKeys';
 import type { AgentStatus } from '@/types/openclaw';
 
 interface AgentFilters {
@@ -14,23 +11,62 @@ interface AgentFilters {
 }
 
 export function useAgents(client: OpenClawClient | null, filters?: AgentFilters) {
-  const connectionState = useSessionStore((s) => s.connectionState);
-  const queryFilters = {
-    status: filters?.status !== 'all' ? filters?.status : undefined,
-    search: filters?.search || undefined,
-  };
+  const queryClient = useQueryClient();
+  const queryFilters = useMemo(
+    () => ({
+      status: filters?.status !== 'all' ? filters?.status : undefined,
+      search: filters?.search || undefined,
+    }),
+    [filters?.search, filters?.status]
+  );
+  const initialAgents = client?.hasSnapshot() ? client.peekAgents(queryFilters) : null;
+
+  useEffect(() => {
+    if (!client) {
+      return;
+    }
+
+    const syncAgents = () => {
+      const raw = client.peekAgents(queryFilters);
+      queryClient.setQueryData(
+        queryKeys.agents.list(queryFilters),
+        raw.items.map(mapAgentSummary)
+      );
+    };
+
+    syncAgents();
+
+    const unsubscribePush = client.subscribeToPushEvents((event) => {
+      if (event.event === 'presence' || event.event === 'agent') {
+        syncAgents();
+      }
+    });
+    const unsubscribeConnection = client.subscribeToConnectionState((state) => {
+      if (state === 'connected') {
+        syncAgents();
+      }
+    });
+
+    return () => {
+      unsubscribePush();
+      unsubscribeConnection();
+    };
+  }, [client, queryClient, queryFilters]);
 
   return useQuery({
     queryKey: queryKeys.agents.list(queryFilters),
     queryFn: async () => {
-      if (!client) throw new Error('No client');
-      const raw = await client.getAgents(queryFilters);
+      if (!client) {
+        throw new Error('No client');
+      }
+
+      const raw = client.hasSnapshot() ? client.peekAgents(queryFilters) : await client.getAgents(queryFilters);
       return raw.items.map(mapAgentSummary);
     },
-    enabled: !!client && connectionState === 'connected',
+    initialData: initialAgents ? initialAgents.items.map(mapAgentSummary) : undefined,
+    enabled: !!client,
     gcTime: 5 * 60 * 1000,
-    staleTime: 10_000,
-    refetchInterval: 30_000,
-    retry: 2,
+    staleTime: Infinity,
+    retry: 1,
   });
 }

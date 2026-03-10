@@ -13,6 +13,7 @@ interface SessionState {
 
   // Actions
   restoreSession: (session: Session) => void;
+  setConnectionState: (state: ConnectionState, reason?: string) => void;
   setConnecting: (url: string) => void;
   setConnected: (session: Session) => void;
   setReconnecting: (reason?: string) => void;
@@ -35,6 +36,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       session,
       lastError: null,
     }),
+
+  setConnectionState: (connectionState: ConnectionState, reason?: string) =>
+    set((state) => ({
+      connectionState,
+      gatewayUrl: state.gatewayUrl ?? state.session?.gatewayUrl ?? null,
+      session: state.session
+        ? { ...state.session, connectionState }
+        : state.session,
+      lastError: reason ?? null,
+    })),
 
   setConnecting: (url: string) =>
     set({ connectionState: 'connecting', gatewayUrl: url, lastError: null }),

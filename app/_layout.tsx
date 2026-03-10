@@ -6,12 +6,6 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import Colors from '@/constants/colors';
 import { openClawAuth } from '@/lib/openclaw/auth';
-import { createStoredSessionClient } from '@/lib/openclaw/client';
-import {
-  buildSessionFromOverview,
-  isUnauthorizedConnectionError,
-  toConnectionErrorMessage,
-} from '@/lib/openclaw/connection';
 import { OpenClawProvider } from '@/providers/OpenClawProvider';
 import { useSessionStore } from '@/stores/sessionStore';
 
@@ -25,10 +19,7 @@ function RootLayoutNav() {
   const rootNavigationState = useRootNavigationState();
   const restoreSession = useSessionStore((state) => state.restoreSession);
   const clearSession = useSessionStore((state) => state.clearSession);
-  const setConnected = useSessionStore((state) => state.setConnected);
-  const setOffline = useSessionStore((state) => state.setOffline);
   const session = useSessionStore((state) => state.session);
-  const connectionState = useSessionStore((state) => state.connectionState);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [bootstrapError, setBootstrapError] = useState<Error | null>(null);
 
@@ -48,45 +39,11 @@ function RootLayoutNav() {
             ...storedSession,
             connectionState: 'reconnecting',
           });
-
-          try {
-            const client = createStoredSessionClient({
-              baseUrl: storedSession.gatewayUrl,
-              retry: 0,
-            });
-            const overview = await client.getOverview();
-            const validatedSession = buildSessionFromOverview(
-              overview,
-              storedSession.gatewayUrl,
-              storedSession
-            );
-
-            await openClawAuth.saveSession(validatedSession);
-
-            if (!isMounted) {
-              return;
-            }
-
-            setConnected(validatedSession);
-          } catch (error) {
-            console.error('[Bootstrap] Failed to validate stored session.', error);
-
-            if (!isMounted) {
-              return;
-            }
-
-            if (isUnauthorizedConnectionError(error) || useSessionStore.getState().connectionState === 'unauthorized') {
-              clearSession();
-              return;
-            }
-
-            setOffline(toConnectionErrorMessage(error));
-          }
         } else {
           clearSession();
         }
       } catch (error) {
-        console.error('[Bootstrap] Failed to bootstrap session.', error);
+        console.error('[Bootstrap] Failed to restore stored session.', error);
 
         if (!isMounted) {
           return;
@@ -110,54 +67,11 @@ function RootLayoutNav() {
     return () => {
       isMounted = false;
     };
-  }, [clearSession, restoreSession, setConnected, setOffline]);
+  }, [clearSession, restoreSession]);
 
   if (bootstrapError) {
     throw bootstrapError;
   }
-
-  // Auto-reconnect when offline/disconnected with a stored session
-  useEffect(() => {
-    const state = connectionState;
-    if (state !== 'offline' && state !== 'disconnected') {
-      return;
-    }
-
-    const storedSession = useSessionStore.getState().session;
-    const storedGatewayUrl = useSessionStore.getState().gatewayUrl;
-    if (!storedSession || !storedGatewayUrl) {
-      return;
-    }
-
-    let attempt = 0;
-    let cancelled = false;
-
-    const tryReconnect = async () => {
-      if (cancelled) return;
-      attempt += 1;
-      const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 30000);
-
-      try {
-        const tempClient = createStoredSessionClient({ baseUrl: storedGatewayUrl });
-        const overview = await tempClient.getOverview();
-        if (cancelled) return;
-
-        const reconnectedSession = buildSessionFromOverview(overview, storedGatewayUrl, storedSession);
-        setConnected(reconnectedSession);
-      } catch {
-        if (!cancelled) {
-          reconnectTimer = setTimeout(tryReconnect, backoffMs);
-        }
-      }
-    };
-
-    let reconnectTimer = setTimeout(tryReconnect, 3000);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(reconnectTimer);
-    };
-  }, [connectionState, setConnected]);
 
   useEffect(() => {
     if (isBootstrapping || !rootNavigationState?.key) {
@@ -174,7 +88,7 @@ function RootLayoutNav() {
     }
 
     if (hasStoredSession && isConnectRoute) {
-      router.replace('/(tabs)');
+      router.replace('/(tabs)/(dashboard)');
     }
   }, [isBootstrapping, rootNavigationState?.key, router, segments, session]);
 
@@ -185,7 +99,7 @@ function RootLayoutNav() {
   return (
     <Stack
       screenOptions={{
-        headerBackTitle: "Back",
+        headerBackTitle: 'Back',
         headerStyle: { backgroundColor: Colors.background },
         headerTintColor: Colors.text,
         headerShadowVisible: false,
@@ -198,7 +112,7 @@ function RootLayoutNav() {
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen
         name="agent/[id]"
-        options={{ headerShown: true, title: "Agent" }}
+        options={{ headerShown: true, title: 'Agent' }}
       />
     </Stack>
   );

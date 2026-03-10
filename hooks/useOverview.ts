@@ -1,26 +1,61 @@
-/**
- * Hook: fetch gateway overview (health, agents, runs, incidents).
- */
-import { useQuery } from '@tanstack/react-query';
-import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { useEffect } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { OpenClawClient } from '@/lib/openclaw/client';
 import { mapGatewayOverview } from '@/lib/openclaw/mappers';
-import { useSessionStore } from '@/stores/sessionStore';
+import { queryKeys } from '@/lib/openclaw/queryKeys';
 
 export function useOverview(client: OpenClawClient | null) {
-  const connectionState = useSessionStore((s) => s.connectionState);
+  const queryClient = useQueryClient();
+  const initialOverview = client?.hasSnapshot() ? client.peekOverview() : null;
+
+  useEffect(() => {
+    if (!client) {
+      return;
+    }
+
+    const syncOverview = () => {
+      const overview = client.peekOverview();
+
+      if (!overview) {
+        return;
+      }
+
+      queryClient.setQueryData(queryKeys.overview, mapGatewayOverview(overview));
+    };
+
+    syncOverview();
+
+    const unsubscribePush = client.subscribeToPushEvents((event) => {
+      if (event.event === 'presence' || event.event === 'agent' || event.event === 'cron' || event.event === 'chat') {
+        syncOverview();
+      }
+    });
+    const unsubscribeConnection = client.subscribeToConnectionState((state) => {
+      if (state === 'connected') {
+        syncOverview();
+      }
+    });
+
+    return () => {
+      unsubscribePush();
+      unsubscribeConnection();
+    };
+  }, [client, queryClient]);
 
   return useQuery({
     queryKey: queryKeys.overview,
     queryFn: async () => {
-      if (!client) throw new Error('No client');
-      const raw = await client.getOverview();
+      if (!client) {
+        throw new Error('No client');
+      }
+
+      const raw = client.peekOverview() ?? (await client.getOverview());
       return mapGatewayOverview(raw);
     },
-    enabled: !!client && connectionState === 'connected',
+    initialData: initialOverview ? mapGatewayOverview(initialOverview) : undefined,
+    enabled: !!client,
     gcTime: 5 * 60 * 1000,
-    staleTime: 15_000,
-    refetchInterval: 30_000,
-    retry: 2,
+    staleTime: Infinity,
+    retry: 1,
   });
 }

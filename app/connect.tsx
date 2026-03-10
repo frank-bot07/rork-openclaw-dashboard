@@ -90,15 +90,17 @@ export default function ConnectScreen() {
         baseUrl: normalizedUrl,
         authToken: trimmedToken,
       });
+      await client.connect();
       const overview = await client.getOverview();
       const session = buildSessionFromOverview(overview, normalizedUrl);
 
       await openClawAuth.saveTokens({ accessToken: trimmedToken });
       await openClawAuth.saveSession(session);
+      client.disconnect('Temporary connect test completed.');
 
       setConnected(session);
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      router.replace('/(tabs)');
+      router.replace('/(tabs)/(dashboard)');
     } catch (error) {
       const nextError = toConnectionErrorMessage(error);
       setErrorMessage(nextError);

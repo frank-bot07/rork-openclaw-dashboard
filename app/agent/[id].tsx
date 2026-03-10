@@ -16,7 +16,7 @@ import { useIsFocused } from '@react-navigation/native';
 import { useQueryClient } from '@tanstack/react-query';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
-import { AlertCircle, Bot, RefreshCw, Send, Sparkles, User } from 'lucide-react-native';
+import { AlertCircle, Bot, Send, Sparkles, User } from 'lucide-react-native';
 import DelegationEvent from '@/components/DelegationEvent';
 import ErrorStateCard from '@/components/ErrorStateCard';
 import { ConversationSkeleton } from '@/components/SkeletonLoader';
@@ -27,15 +27,12 @@ import Colors from '@/constants/colors';
 import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
 import { useAgentDetail } from '@/hooks/useAgentDetail';
 import { useConversation, useSendMessage } from '@/hooks/useConversation';
-import { openClawAuth } from '@/lib/openclaw/auth';
 import { createOpenClawEventsAdapter } from '@/lib/openclaw/events';
 import { mapConversationMessage } from '@/lib/openclaw/mappers';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
 import { useOpenClaw } from '@/providers/OpenClawProvider';
-import { useSessionStore } from '@/stores/sessionStore';
 import type { Agent, ChatMessage, ConversationViewModel, EventPayload } from '@/types/openclaw';
 
-const EVENT_POLL_INTERVAL_MS = 3_000;
 const MESSAGE_SEND_RATE_LIMIT_MS = 500;
 
 export default function AgentDetailScreen() {
@@ -45,25 +42,18 @@ export default function AgentDetailScreen() {
   const isFocused = useIsFocused();
   const queryClient = useQueryClient();
   const { client, agents } = useOpenClaw();
-  const gatewayUrl = useSessionStore((state) => state.gatewayUrl ?? state.session?.gatewayUrl ?? null);
   const agentDetailQuery = useAgentDetail(client, agentId);
   const conversationQuery = useConversation(client, agentId);
   const sendMessageMutation = useSendMessage(client);
-  const cursorRef = useRef<string | undefined>(undefined);
   const lastMessageSentAtRef = useRef(0);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [lastSubmittedAt, setLastSubmittedAt] = useState<string | null>(null);
-  const [usingRefetchFallback, setUsingRefetchFallback] = useState(false);
 
   const agent = agentDetailQuery.data?.agent ?? agents.find((candidate) => candidate.id === agentId);
   const conversationKey = useMemo(
     () => queryKeys.conversations.byAgent(agentId ?? ''),
     [agentId]
   );
-
-  useEffect(() => {
-    cursorRef.current = conversationQuery.data?.nextCursor ?? undefined;
-  }, [conversationQuery.data?.nextCursor]);
 
   const updateConversationCache = useCallback(
     (updater: (current: ConversationViewModel) => ConversationViewModel) => {
@@ -80,8 +70,6 @@ export default function AgentDetailScreen() {
 
   const handleRealtimeEvent = useCallback(
     (event: EventPayload) => {
-      cursorRef.current = event.createdAt;
-
       if (event.type === 'message.delta') {
         const payload = event.payload as { messageId?: unknown; delta?: unknown };
         const messageId = typeof payload.messageId === 'string' ? payload.messageId : null;
@@ -168,25 +156,19 @@ export default function AgentDetailScreen() {
   );
 
   useEffect(() => {
-    if (!agentId || !client || !gatewayUrl || !isFocused) {
-      setUsingRefetchFallback(false);
+    if (!agentId || !client || !isFocused) {
       return;
     }
 
     let subscriptionClosed = false;
 
     const adapter = createOpenClawEventsAdapter({
-      baseUrl: gatewayUrl,
-      getAuthToken: () => openClawAuth.getValidAccessToken(),
-      pollIntervalMs: EVENT_POLL_INTERVAL_MS,
-      transport: 'auto',
+      client,
     });
 
     const subscription = adapter.subscribe({
       agentId,
       conversationId: resolveConversationId(conversationQuery.data?.id) ?? undefined,
-      cursor: cursorRef.current,
-      pollIntervalMs: EVENT_POLL_INTERVAL_MS,
       onEvent: (event) => {
         if (subscriptionClosed) {
           return;
@@ -201,23 +183,16 @@ export default function AgentDetailScreen() {
 
         console.error('[AgentEvents] Subscription error.', error);
       },
-      onFallbackStateChange: (isUsingPollingFallback) => {
-        if (!subscriptionClosed) {
-          setUsingRefetchFallback(isUsingPollingFallback);
-        }
-      },
     });
 
     return () => {
       subscriptionClosed = true;
       subscription.close();
-      setUsingRefetchFallback(false);
     };
   }, [
     agentId,
     client,
     conversationQuery,
-    gatewayUrl,
     handleRealtimeEvent,
     isFocused,
   ]);
@@ -410,7 +385,6 @@ export default function AgentDetailScreen() {
         }}
         isSending={sendMessageMutation.isPending}
         isWaitingForReply={showTypingIndicator}
-        usingRefetchFallback={usingRefetchFallback}
         accentColor={accentColor}
       />
     </View>
@@ -426,7 +400,6 @@ function ChatView({
   onSend,
   isSending,
   isWaitingForReply,
-  usingRefetchFallback,
   accentColor,
 }: {
   agent: Agent;
@@ -437,7 +410,6 @@ function ChatView({
   onSend: (content: string) => boolean;
   isSending: boolean;
   isWaitingForReply: boolean;
-  usingRefetchFallback: boolean;
   accentColor: { bg: string; text: string; border: string };
 }) {
   const [input, setInput] = useState('');
@@ -533,13 +505,6 @@ function ChatView({
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 160 : 0}
     >
-      {usingRefetchFallback ? (
-        <View style={styles.liveState}>
-          <RefreshCw size={13} color={Colors.textMuted} />
-          <Text style={styles.liveStateText}>Refreshing chat every 3s</Text>
-        </View>
-      ) : null}
-
       {isConversationLoading ? (
         <ConversationSkeleton style={styles.chatLoading} />
       ) : (

@@ -1,30 +1,85 @@
-/**
- * Hook: fetch conversation history + send message mutation.
- */
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useEffect } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { OpenClawClient, OpenClawClientError } from '@/lib/openclaw/client';
+import { mapConversation, mapConversationMessage } from '@/lib/openclaw/mappers';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
 import { safeInvalidateQueries } from '@/lib/openclaw/queryUtils';
-import { mapConversation, mapConversationMessage } from '@/lib/openclaw/mappers';
-import { useSessionStore } from '@/stores/sessionStore';
 import type { ChatMessage, ConversationViewModel } from '@/types/openclaw';
 
 const CONVERSATION_QUERY_GC_TIME = 10 * 60 * 1000;
 const MAX_MESSAGE_CONTENT_LENGTH = 4_000;
 
 export function useConversation(client: OpenClawClient | null, agentId: string | undefined) {
-  const connectionState = useSessionStore((s) => s.connectionState);
+  const queryClient = useQueryClient();
+  const conversationKey = queryKeys.conversations.byAgent(agentId ?? '');
+  const initialConversation =
+    agentId && client?.hasSnapshot() ? client.peekConversation({ agentId }) : null;
 
-  const query = useQuery({
-    queryKey: queryKeys.conversations.byAgent(agentId ?? ''),
+  useEffect(() => {
+    if (!client || !agentId) {
+      return;
+    }
+
+    const syncConversation = () => {
+      const raw = client.peekConversation({ agentId });
+
+      if (!raw) {
+        return;
+      }
+
+      const nextConversation = mapConversation(raw);
+      queryClient.setQueryData<ConversationViewModel>(conversationKey, (current) => ({
+        ...nextConversation,
+        events: current?.events ?? nextConversation.events,
+        messages: mergeMessages([...(current?.messages ?? []), ...nextConversation.messages]),
+        latestRun: nextConversation.latestRun ?? current?.latestRun ?? null,
+        nextCursor: nextConversation.nextCursor ?? current?.nextCursor ?? null,
+      }));
+    };
+
+    syncConversation();
+
+    const unsubscribePush = client.subscribeToPushEvents((event) => {
+      if (event.event === 'chat' || event.event === 'agent' || event.event === 'presence') {
+        syncConversation();
+      }
+    });
+    const unsubscribeConnection = client.subscribeToConnectionState((state) => {
+      if (state === 'connected') {
+        syncConversation();
+      }
+    });
+
+    return () => {
+      unsubscribePush();
+      unsubscribeConnection();
+    };
+  }, [agentId, client, conversationKey, queryClient]);
+
+  return useQuery({
+    queryKey: conversationKey,
     queryFn: async () => {
       if (!client || !agentId) throw new Error('No client or agent id');
 
       try {
         const raw = await client.getConversation({ agentId });
-        return mapConversation(raw);
+        const nextConversation = mapConversation(raw);
+        const current = queryClient.getQueryData<ConversationViewModel>(conversationKey);
+
+        return current
+          ? {
+              ...nextConversation,
+              events: current.events,
+              messages: mergeMessages([...current.messages, ...nextConversation.messages]),
+              latestRun: nextConversation.latestRun ?? current.latestRun ?? null,
+              nextCursor: nextConversation.nextCursor ?? current.nextCursor ?? null,
+            }
+          : nextConversation;
       } catch (error) {
-        if (error instanceof OpenClawClientError && error.status === 404) {
+        if (
+          error instanceof OpenClawClientError &&
+          (error.status === 404 || error.code === 'SESSION_KEY_REQUIRED')
+        ) {
           return {
             id: `pending:${agentId}`,
             agentId,
@@ -38,13 +93,12 @@ export function useConversation(client: OpenClawClient | null, agentId: string |
         throw error;
       }
     },
-    enabled: !!client && !!agentId && connectionState === 'connected',
+    initialData: initialConversation ? mapConversation(initialConversation) : undefined,
+    enabled: !!client && !!agentId,
     gcTime: CONVERSATION_QUERY_GC_TIME,
-    staleTime: 5_000,
-    retry: 2,
+    staleTime: Infinity,
+    retry: 1,
   });
-
-  return query;
 }
 
 export function useSendMessage(client: OpenClawClient | null) {
@@ -86,33 +140,28 @@ export function useSendMessage(client: OpenClawClient | null) {
         role: 'user',
         content: normalizedContent,
         timestamp: optimisticTimestamp,
-        conversationId: variables.conversationId ?? queryClient.getQueryData<ConversationViewModel>(conversationKey)?.id ?? null,
+        conversationId:
+          variables.conversationId ??
+          queryClient.getQueryData<ConversationViewModel>(conversationKey)?.id ??
+          null,
         status: 'pending',
         metadata: variables.metadata,
       };
 
-      queryClient.setQueryData<ConversationViewModel>(conversationKey, (current) => {
-        const currentConversation = current;
-
-        return {
-          id:
-            currentConversation?.id ??
-            variables.conversationId ??
-            `pending:${variables.agentId}`,
-          agentId: variables.agentId,
-          agentName: currentConversation?.agentName,
-          events: currentConversation?.events ?? [],
-          latestRun: currentConversation?.latestRun ?? null,
-          nextCursor: currentConversation?.nextCursor ?? null,
-          messages: mergeMessages([...(currentConversation?.messages ?? []), optimisticMessage]),
-        };
-      });
+      queryClient.setQueryData<ConversationViewModel>(conversationKey, (current) => ({
+        id: current?.id ?? variables.conversationId ?? `pending:${variables.agentId}`,
+        agentId: variables.agentId,
+        agentName: current?.agentName,
+        events: current?.events ?? [],
+        latestRun: current?.latestRun ?? null,
+        nextCursor: current?.nextCursor ?? null,
+        messages: mergeMessages([...(current?.messages ?? []), optimisticMessage]),
+      }));
 
       return {
         agentId: variables.agentId,
         mutationId,
         optimisticMessageId: optimisticMessage.id,
-        optimisticTimestamp,
       };
     },
     onError: (_error, variables, context) => {
