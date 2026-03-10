@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import { View, StyleSheet, Animated, Platform } from 'react-native';
 import { Tabs } from 'expo-router';
-import { LayoutDashboard, Bot, Clock, Settings } from 'lucide-react-native';
+import { LayoutDashboard, Bot, Activity, Settings } from 'lucide-react-native';
 import { BlurView } from 'expo-blur';
 import Colors from '@/constants/colors';
 
@@ -92,8 +92,8 @@ export default function TabLayout() {
       <Tabs.Screen
         name="scheduler"
         options={{
-          title: 'Scheduler',
-          tabBarIcon: ({ focused }) => <AnimatedTabIcon Icon={Clock} focused={focused} />,
+          title: 'Runs',
+          tabBarIcon: ({ focused }) => <AnimatedTabIcon Icon={Activity} focused={focused} />,
         }}
       />
       <Tabs.Screen
