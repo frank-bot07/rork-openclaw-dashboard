@@ -375,7 +375,11 @@ export default function RunsScreen() {
                         <RunCard
                           key={run.id}
                           run={run}
-                          onPress={() => router.push(`/agent/${run.agentId}`)}
+                          onPress={() => {
+                            if (run.agentId) {
+                              router.push(`/agent/${run.agentId}`);
+                            }
+                          }}
                           onRetry={handleRetryRun}
                           isRetrying={retryRunMutation.isPending && retryRunMutation.variables === run.id}
                         />

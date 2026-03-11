@@ -58,6 +58,7 @@ export function mapAgentSummary(raw: GatewayAgentResponse): Agent {
   return {
     id: raw.id,
     name: raw.name,
+    avatar: raw.avatar ?? null,
     status: (raw.status ?? 'offline') as AgentStatus,
     model: raw.model ?? 'unknown',
     provider: raw.provider ?? 'unknown',

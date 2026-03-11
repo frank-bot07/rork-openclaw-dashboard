@@ -303,7 +303,9 @@ export default function AgentDetailScreen() {
 
       <View style={styles.agentHeader}>
         <View style={[styles.agentAvatar, { backgroundColor: accentColor.bg, borderColor: ringColor }]}>
-          <Text style={[styles.avatarText, { color: accentColor.text }]}>{agent.name[0]}</Text>
+          <Text style={[styles.avatarText, { color: accentColor.text }]}>
+            {agent.avatar ?? agent.name[0]}
+          </Text>
         </View>
         <View style={styles.agentMeta}>
           <Text style={styles.agentName}>{agent.name}</Text>

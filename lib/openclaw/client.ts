@@ -86,11 +86,42 @@ interface PendingRequest {
 interface SnapshotState {
   overview: GatewayOverviewResponse | null;
   agentsById: Map<string, GatewayAgentResponse>;
+  defaultAgentId: string | null;
   sessionKeyByAgentId: Map<string, string>;
   agentIdBySessionKey: Map<string, string>;
+  sessionsByKey: Map<string, GatewaySessionSnapshot>;
   conversationsBySessionKey: Map<string, GatewayConversationResponse>;
   runsById: Map<string, GatewayRunResponse>;
   incidentsById: Map<string, GatewayIncidentResponse>;
+  nodesById: Map<string, GatewayNodeSnapshot>;
+}
+
+interface GatewaySessionSnapshot {
+  sessionKey: string;
+  agentId: string;
+  agentName?: string;
+  status: GatewayRunResponse['status'];
+  createdAt: string;
+  updatedAt: string;
+  model?: string;
+  provider?: string;
+  channelType?: string | null;
+  channelLabel?: string | null;
+  channelIdentifier?: string | null;
+  connected?: boolean;
+  messageCount?: number | null;
+  tokenCount?: number | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  metadata: Record<string, unknown>;
+}
+
+interface GatewayNodeSnapshot {
+  id: string;
+  label: string;
+  status: string;
+  lastSeenAt: string | null;
+  metadata: Record<string, unknown>;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -102,7 +133,7 @@ const DEFAULT_RECONNECT_CONFIG: OpenClawReconnectConfig = {
 const DEFAULT_SCOPES = ['operator.admin', 'operator.approvals', 'operator.pairing'];
 const DEFAULT_CAPS = ['tool-events'];
 const SUPPORTED_PROTOCOL_VERSION = 3;
-const RUNS_REFRESH_INTERVAL_MS = 30_000;
+const GATEWAY_DATA_REFRESH_INTERVAL_MS = 30_000;
 
 export class OpenClawClientError extends Error {
   status?: number;
@@ -137,8 +168,8 @@ export class OpenClawClient {
   private reconnectAttempt = 0;
   private hasConnectedAtLeastOnce = false;
   private manuallyClosed = false;
-  private lastRunsRefreshAt = 0;
-  private refreshRunsPromise: Promise<void> | null = null;
+  private lastGatewayDataRefreshAt = 0;
+  private refreshGatewayDataPromise: Promise<void> | null = null;
 
   constructor(config: OpenClawClientConfig) {
     this.config = {
@@ -282,15 +313,12 @@ export class OpenClawClient {
   }
 
   peekAgent(agentId: string) {
-    const agent = this.snapshot.agentsById.get(agentId);
+    const agent = this.buildAgentSnapshot(agentId);
     return agent ? cloneAgent(agent) : null;
   }
 
   peekAgents(query?: AgentQuery): GatewayCollectionResponse<GatewayAgentResponse> {
-    const items = filterAgents(
-      [...this.snapshot.agentsById.values()].map(cloneAgent),
-      query
-    );
+    const items = filterAgents(this.collectAgentSnapshots(), query);
 
     return {
       items,
@@ -331,7 +359,7 @@ export class OpenClawClient {
   }
 
   getConversationKeyForAgent(agentId: string) {
-    return this.snapshot.sessionKeyByAgentId.get(agentId) ?? null;
+    return resolveDefaultSessionKeyForAgent(agentId, this.snapshot);
   }
 
   getAgentIdForConversation(sessionKey: string) {
@@ -340,6 +368,7 @@ export class OpenClawClient {
 
   async getOverview(_signal?: AbortSignal) {
     await this.connect();
+    await this.refreshGatewayData();
 
     if (!this.snapshot.overview) {
       throw new OpenClawClientError('Gateway hello snapshot was not available after connect.', {
@@ -352,12 +381,14 @@ export class OpenClawClient {
 
   async getAgents(query?: AgentQuery, _signal?: AbortSignal) {
     await this.connect();
+    await this.refreshGatewayData();
     return this.peekAgents(query);
   }
 
   async getAgent(agentId: string, _signal?: AbortSignal) {
     await this.connect();
-    const agent = this.snapshot.agentsById.get(agentId);
+    await this.refreshGatewayData();
+    const agent = this.buildAgentSnapshot(agentId);
 
     if (!agent) {
       throw new OpenClawClientError('Agent not found.', {
@@ -430,7 +461,7 @@ export class OpenClawClient {
     const runPayload = await this.request('chat.send', {
       sessionKey,
       message: input.content,
-      deliver: true,
+      deliver: false,
       idempotencyKey,
     }, {
       signal,
@@ -456,7 +487,7 @@ export class OpenClawClient {
 
   async getRuns(query?: RunsQuery, signal?: AbortSignal) {
     await this.connect();
-    await this.refreshRunsFromUsage(signal);
+    await this.refreshGatewayData(signal);
     return this.peekRuns(query);
   }
 
@@ -479,9 +510,16 @@ export class OpenClawClient {
 
   private async request(method: string, params: Record<string, unknown>, options: RequestOptions = {}) {
     await this.connect();
+    return this.sendRequest(method, params, options);
+  }
 
+  private async sendRequest(
+    method: string,
+    params: Record<string, unknown>,
+    options: RequestOptions = {}
+  ) {
     const socket = this.socket;
-    if (!socket || socket.readyState !== socket.OPEN || this.connectionState !== 'connected') {
+    if (!socket || socket.readyState !== socket.OPEN) {
       throw new OpenClawClientError('Gateway connection is not ready.', {
         code: 'WS_NOT_CONNECTED',
       });
@@ -641,7 +679,14 @@ export class OpenClawClient {
       this.reconnectAttempt = 0;
       this.hasConnectedAtLeastOnce = true;
       this.setConnectionState('connected');
-      this.resolveConnectPromise(overview);
+      void this.bootstrapGatewayData()
+        .catch((error) => {
+          const normalized = normalizeError(error, 'Failed to load gateway data.');
+          console.error('[OpenClaw] Failed to bootstrap gateway data.', normalized);
+        })
+        .finally(() => {
+          this.resolveConnectPromise(this.snapshot.overview ?? overview);
+        });
       return;
     }
 
@@ -751,13 +796,11 @@ export class OpenClawClient {
     const entries = getArray(root?.presence) ?? (Array.isArray(payload) ? payload : [payload]);
 
     for (const entry of entries) {
-      const record = asRecord(asRecord(entry)?.agent) ?? asRecord(entry);
-      const agentId = firstString(record?.id, record?.agentId);
-      const existing = agentId ? this.snapshot.agentsById.get(agentId) : undefined;
-      const agent = normalizeAgentPayload(record, existing ?? undefined);
+      const record = asRecord(entry);
+      const node = normalizeNodePayload(record);
 
-      if (agent) {
-        this.upsertAgent(agent);
+      if (node) {
+        this.snapshot.nodesById.set(node.id, node);
       }
     }
   }
@@ -808,6 +851,18 @@ export class OpenClawClient {
 
     const state = firstString(root?.state, root?.phase) ?? 'final';
     const messageRoot = asRecord(root?.message);
+    const createdAt = firstString(root?.createdAt, messageRoot?.createdAt) ?? new Date().toISOString();
+
+    this.upsertSession(
+      normalizeSessionPayload(root, {
+        agentId,
+        agentName: agentId ? this.buildAgentSnapshot(agentId)?.name : undefined,
+        status: mapChatStateToRunStatus(state),
+        createdAt,
+        updatedAt: createdAt,
+        sessionKey,
+      })
+    );
 
     if (state === 'delta') {
       const messageId =
@@ -828,13 +883,13 @@ export class OpenClawClient {
           status: 'streaming',
         });
 
-      this.upsertConversationMessage(sessionKey, {
-        ...currentMessage,
-        content: `${currentMessage.content}${delta}`,
-        createdAt: firstString(messageRoot?.createdAt, root?.createdAt) ?? new Date().toISOString(),
-        runId: firstString(messageRoot?.runId, root?.runId) ?? currentMessage.runId ?? null,
-        status: 'streaming',
-      });
+        this.upsertConversationMessage(sessionKey, {
+          ...currentMessage,
+          content: `${currentMessage.content}${delta}`,
+          createdAt,
+          runId: firstString(messageRoot?.runId, root?.runId) ?? currentMessage.runId ?? null,
+          status: 'streaming',
+        });
     } else if (state === 'final') {
       const message = normalizeConversationMessage(messageRoot ?? root, agentId, sessionKey, 'assistant');
 
@@ -879,7 +934,7 @@ export class OpenClawClient {
               ? 'Run completed.'
               : 'Run in progress.',
       status: mapChatStateToRunStatus(state),
-      createdAt: firstString(root?.createdAt) ?? new Date().toISOString(),
+      createdAt,
     });
 
     if (run) {
@@ -930,7 +985,7 @@ export class OpenClawClient {
       return;
     }
 
-    const agents = sortAgents([...this.snapshot.agentsById.values()].map(cloneAgent));
+    const agents = sortAgents(this.collectAgentSnapshots());
     const recentRuns = sortRuns([...this.snapshot.runsById.values()].map(cloneRun));
     const incidents = sortIncidents([...this.snapshot.incidentsById.values()].map(cloneIncident));
     const existingStats = this.snapshot.overview.stats ?? {};
@@ -941,8 +996,12 @@ export class OpenClawClient {
       gateway: {
         ...gateway,
         online: this.connectionState === 'connected',
+        capabilities: {
+          ...gateway.capabilities,
+        },
       },
       coordinator:
+        agents.find((agent) => agent.id === this.snapshot.defaultAgentId) ??
         agents.find((agent) => agent.isCoordinator || agent.role === 'coordinator') ??
         this.snapshot.overview.coordinator ??
         null,
@@ -980,8 +1039,15 @@ export class OpenClawClient {
       return;
     }
 
+    const normalizedRun =
+      !run.agentName && run.agentId
+        ? {
+            ...run,
+            agentName: this.buildAgentSnapshot(run.agentId)?.name ?? run.agentName ?? '',
+          }
+        : run;
     const existing = this.snapshot.runsById.get(run.id);
-    const merged = mergeRun(existing, run);
+    const merged = mergeRun(existing, normalizedRun);
     this.snapshot.runsById.set(merged.id, merged);
   }
 
@@ -1042,7 +1108,7 @@ export class OpenClawClient {
     }
 
     if (query.agentId) {
-      return this.snapshot.sessionKeyByAgentId.get(query.agentId) ?? null;
+      return resolveDefaultSessionKeyForAgent(query.agentId, this.snapshot);
     }
 
     return null;
@@ -1052,45 +1118,209 @@ export class OpenClawClient {
     return this.snapshot.agentIdBySessionKey.get(sessionKey) ?? null;
   }
 
-  private async refreshRunsFromUsage(signal?: AbortSignal) {
-    if (Date.now() - this.lastRunsRefreshAt < RUNS_REFRESH_INTERVAL_MS && this.snapshot.runsById.size > 0) {
+  private async bootstrapGatewayData() {
+    await this.refreshGatewayData(undefined, true);
+  }
+
+  private async refreshGatewayData(signal?: AbortSignal, force = false) {
+    if (
+      !force &&
+      Date.now() - this.lastGatewayDataRefreshAt < GATEWAY_DATA_REFRESH_INTERVAL_MS &&
+      this.snapshot.agentsById.size > 0
+    ) {
       return;
     }
 
-    if (this.refreshRunsPromise) {
-      return this.refreshRunsPromise;
+    if (this.refreshGatewayDataPromise) {
+      return this.refreshGatewayDataPromise;
     }
 
-    this.refreshRunsPromise = (async () => {
-      try {
-        const endDate = new Date();
-        const startDate = new Date(endDate.getTime() - 7 * 24 * 60 * 60 * 1000);
-        const payload = await this.request('sessions.usage', {
-          startDate: startDate.toISOString(),
-          endDate: endDate.toISOString(),
-          limit: 100,
-        }, {
+    this.refreshGatewayDataPromise = (async () => {
+      const agentsPayload = await this.sendRequest('agents.list', {}, { signal, retryable: false });
+      const agentList = normalizeAgentsListPayload(agentsPayload);
+      const defaultAgentId = agentList.defaultId ?? this.snapshot.defaultAgentId;
+      const agentIds = dedupeStrings(
+        agentList.agents.map((entry) => entry.id).filter((entry): entry is string => Boolean(entry))
+      );
+      const identityResponses = await Promise.all(
+        agentIds.map(async (agentId) => {
+          try {
+            const payload = await this.sendRequest(
+              'agent.identity.get',
+              { agentId },
+              { signal, retryable: false }
+            );
+            return { agentId, payload };
+          } catch (error) {
+            console.warn(`[OpenClaw] Failed to load identity for agent "${agentId}".`, error);
+            return { agentId, payload: null };
+          }
+        })
+      );
+      const sessionsPayload = await this.sendRequest(
+        'sessions.list',
+        {
+          activeMinutes: 120,
+          limit: 20,
+        },
+        {
           signal,
           retryable: false,
-        });
+        }
+      );
 
-        collectNormalizedRuns(payload).forEach((run) => {
-          this.upsertRun(run);
-        });
-        this.lastRunsRefreshAt = Date.now();
-        this.syncOverviewCollections();
-      } catch (error) {
-        const normalized = normalizeError(error, 'Failed to refresh session usage.');
+      this.applyRpcSnapshot({
+        defaultAgentId,
+        agentIds,
+        identities: identityResponses,
+        sessionsPayload,
+      });
+      this.lastGatewayDataRefreshAt = Date.now();
+      this.syncOverviewCollections();
+    })()
+      .catch((error) => {
+        const normalized = normalizeError(error, 'Failed to refresh gateway data.');
 
         if (normalized.code !== 'METHOD_NOT_FOUND') {
           this.lastConnectionError = normalized;
         }
-      }
-    })().finally(() => {
-      this.refreshRunsPromise = null;
-    });
 
-    return this.refreshRunsPromise;
+        throw normalized;
+      })
+      .finally(() => {
+        this.refreshGatewayDataPromise = null;
+      });
+
+    return this.refreshGatewayDataPromise;
+  }
+
+  private applyRpcSnapshot(input: {
+    defaultAgentId: string | null;
+    agentIds: string[];
+    identities: { agentId: string; payload: unknown }[];
+    sessionsPayload: unknown;
+  }) {
+    this.snapshot.defaultAgentId = input.defaultAgentId;
+    this.snapshot.agentsById.clear();
+    this.snapshot.sessionKeyByAgentId.clear();
+    this.snapshot.agentIdBySessionKey.clear();
+    this.snapshot.sessionsByKey.clear();
+    this.snapshot.runsById.clear();
+
+    const identitiesByAgentId = new Map(
+      input.identities.map((entry) => [entry.agentId, normalizeAgentIdentityPayload(entry.payload, entry.agentId)])
+    );
+    const sessions = normalizeSessionsListPayload(input.sessionsPayload);
+    const sessionAgentIds = dedupeStrings(sessions.map((session) => session.agentId));
+    const allAgentIds = dedupeStrings([
+      ...input.agentIds,
+      ...sessionAgentIds,
+      ...(input.defaultAgentId ? [input.defaultAgentId] : []),
+    ]);
+
+    for (const agentId of allAgentIds) {
+      const identity = identitiesByAgentId.get(agentId);
+      const fallback = this.snapshot.overview?.agents.find((agent) => agent.id === agentId);
+      const agent = normalizeAgentPayload(
+        {
+          id: agentId,
+          agentId,
+          name: identity?.name ?? fallback?.name ?? agentId,
+          avatar: identity?.avatar ?? fallback?.avatar ?? null,
+          role:
+            agentId === input.defaultAgentId
+              ? 'coordinator'
+              : fallback?.role,
+          isCoordinator:
+            agentId === input.defaultAgentId
+              ? true
+              : fallback?.isCoordinator,
+        },
+        fallback
+      );
+
+      if (agent) {
+        this.upsertAgent(agent);
+      }
+    }
+
+    for (const session of sessions) {
+      this.upsertSession(session);
+      this.upsertRun(
+        sessionToRun(session, {
+          agentName: this.snapshot.agentsById.get(session.agentId)?.name ?? session.agentName ?? session.agentId,
+        })
+      );
+    }
+  }
+
+  private collectAgentSnapshots() {
+    return sortAgents(
+      [...this.snapshot.agentsById.keys()]
+        .map((agentId) => this.buildAgentSnapshot(agentId))
+        .filter((agent): agent is GatewayAgentResponse => Boolean(agent))
+        .map(cloneAgent)
+    );
+  }
+
+  private buildAgentSnapshot(agentId: string) {
+    const base = this.snapshot.agentsById.get(agentId);
+
+    if (!base) {
+      return null;
+    }
+
+    const sessions = sortSessionSnapshots(
+      [...this.snapshot.sessionsByKey.values()]
+        .filter((session) => session.agentId === agentId)
+        .map(cloneSessionSnapshot)
+    );
+    const latestSession = sessions[0] ?? null;
+    const activeSession =
+      sessions.find((session) => session.status === 'running' || session.status === 'queued') ?? latestSession;
+    const channels = mergeAgentChannels(base.channels ?? [], sessions);
+    const currentRun = activeSession
+      ? sessionToRun(activeSession, {
+          agentName: base.name,
+        })
+      : base.currentRun ?? null;
+
+    return mergeAgent(base, {
+      ...base,
+      status: deriveAgentStatus(base, sessions),
+      model: latestSession?.model ?? base.model ?? 'unknown',
+      provider: latestSession?.provider ?? base.provider ?? 'unknown',
+      lastActivityAt: latestSession?.updatedAt ?? base.lastActivityAt ?? new Date().toISOString(),
+      channels,
+      currentRun,
+      conversationId: resolveDefaultSessionKeyForAgent(agentId, this.snapshot),
+      role:
+        agentId === this.snapshot.defaultAgentId
+          ? 'coordinator'
+          : base.role,
+      isCoordinator:
+        agentId === this.snapshot.defaultAgentId
+          ? true
+          : base.isCoordinator,
+    });
+  }
+
+  private upsertSession(session: GatewaySessionSnapshot | null) {
+    if (!session?.sessionKey || !session.agentId) {
+      return;
+    }
+
+    const existing = this.snapshot.sessionsByKey.get(session.sessionKey);
+    const merged = mergeSessionSnapshot(existing, session);
+    this.snapshot.sessionsByKey.set(merged.sessionKey, merged);
+    this.snapshot.agentIdBySessionKey.set(merged.sessionKey, merged.agentId);
+
+    const currentDefault = this.snapshot.sessionKeyByAgentId.get(merged.agentId);
+    const currentSession = currentDefault ? this.snapshot.sessionsByKey.get(currentDefault) : null;
+
+    if (!currentSession || compareSessionPreference(merged, currentSession) < 0) {
+      this.snapshot.sessionKeyByAgentId.set(merged.agentId, merged.sessionKey);
+    }
   }
 
   private setConnectionState(state: ConnectionState, error: OpenClawClientError | null = null) {
@@ -1291,10 +1521,7 @@ function normalizeHelloPayload(payload: unknown, baseUrl: string): GatewayOvervi
   const sessionRecord = asRecord(snapshot.session) ?? asRecord(root?.session) ?? {};
   const statsRecord = asRecord(snapshot.stats) ?? asRecord(root?.stats);
   const activityItems = getArray(snapshot.activity) ?? getArray(root?.activity) ?? [];
-  const agentItems = [
-    ...(getArray(snapshot.agents) ?? []),
-    ...(getArray(snapshot.presence) ?? getArray(root?.presence) ?? []),
-  ];
+  const agentItems = [...(getArray(snapshot.agents) ?? [])];
   const runItems = [
     ...(getArray(snapshot.recentRuns) ?? []),
     ...(getArray(snapshot.runs) ?? getArray(root?.runs) ?? []),
@@ -1468,6 +1695,7 @@ function normalizeAgentPayload(
   return {
     id,
     name: firstString(record?.name, record?.agentName, record?.label) ?? fallback?.name ?? id,
+    avatar: firstString(record?.avatar, record?.emoji) ?? fallback?.avatar ?? null,
     status,
     model: firstString(record?.model, record?.modelName) ?? fallback?.model ?? 'unknown',
     provider: firstString(record?.provider, record?.vendor) ?? fallback?.provider ?? 'unknown',
@@ -1708,6 +1936,194 @@ function normalizeConversationMessage(
   };
 }
 
+function normalizeAgentIdentityPayload(payload: unknown, fallbackAgentId: string) {
+  const record = asRecord(payload);
+
+  return {
+    agentId:
+      firstString(record?.agentId, record?.id) ??
+      fallbackAgentId,
+    name:
+      firstString(record?.name, record?.agentName, record?.label) ??
+      fallbackAgentId,
+    avatar: firstString(record?.avatar, record?.emoji) ?? null,
+  };
+}
+
+function normalizeAgentsListPayload(payload: unknown) {
+  const record = asRecord(payload);
+  const items = getArray(record?.agents) ?? (Array.isArray(payload) ? payload : []);
+
+  return {
+    defaultId: firstString(record?.defaultId, record?.defaultAgentId) ?? null,
+    agents: items
+      .map((entry) => {
+        const agentRecord = asRecord(entry);
+
+        return {
+          id: firstString(agentRecord?.id, agentRecord?.agentId),
+        };
+      })
+      .filter((entry): entry is { id: string } => Boolean(entry.id)),
+  };
+}
+
+function normalizeSessionsListPayload(payload: unknown) {
+  const record = asRecord(payload);
+  const items = getArray(record?.sessions) ?? getArray(record?.items) ?? (Array.isArray(payload) ? payload : []);
+
+  return items
+    .map((entry) => normalizeSessionPayload(entry))
+    .filter((session): session is GatewaySessionSnapshot => Boolean(session));
+}
+
+function normalizeSessionPayload(
+  value: unknown,
+  fallback: Partial<GatewaySessionSnapshot> = {}
+): GatewaySessionSnapshot | null {
+  const record = asRecord(value);
+  const sessionKey =
+    firstString(
+      record?.sessionKey,
+      record?.id,
+      record?.conversationId,
+      record?.conversationKey,
+      record?.threadId
+    ) ?? fallback.sessionKey;
+  const agentRecord = asRecord(record?.agent);
+  const agentId =
+    firstString(record?.agentId, agentRecord?.id) ??
+    parseAgentIdFromSessionKey(sessionKey) ??
+    fallback.agentId;
+
+  if (!sessionKey || !agentId) {
+    return null;
+  }
+
+  const channelRecord = asRecord(record?.channel);
+  const createdAt =
+    firstString(record?.createdAt, record?.startedAt, record?.updatedAt, record?.lastMessageAt) ??
+    fallback.createdAt ??
+    new Date().toISOString();
+  const updatedAt =
+    firstString(record?.updatedAt, record?.lastMessageAt, record?.lastActivityAt, record?.createdAt) ??
+    fallback.updatedAt ??
+    createdAt;
+
+  return {
+    sessionKey,
+    agentId,
+    agentName:
+      firstString(record?.agentName, agentRecord?.name) ??
+      fallback.agentName,
+    status:
+      normalizeSessionStatus(
+        firstString(
+          record?.status,
+          record?.state,
+          record?.runStatus,
+          asRecord(record?.run)?.status,
+          asRecord(record?.latestRun)?.status
+        ),
+        record,
+        fallback.status
+      ),
+    createdAt,
+    updatedAt,
+    model:
+      firstString(
+        record?.model,
+        record?.modelName,
+        asRecord(record?.usage)?.model,
+        asRecord(record?.latestRun)?.model
+      ) ?? fallback.model,
+    provider:
+      firstString(
+        record?.provider,
+        record?.vendor,
+        record?.modelProvider,
+        asRecord(record?.usage)?.provider
+      ) ?? fallback.provider,
+    channelType:
+      firstString(channelRecord?.type, record?.channelType) ??
+      fallback.channelType ??
+      inferChannelTypeFromSessionKey(sessionKey),
+    channelLabel:
+      firstString(channelRecord?.label, channelRecord?.name, record?.channelLabel) ??
+      fallback.channelLabel ??
+      inferChannelLabelFromSessionKey(sessionKey),
+    channelIdentifier:
+      firstString(channelRecord?.identifier, channelRecord?.id, record?.channelId) ??
+      fallback.channelIdentifier ??
+      null,
+    connected:
+      firstBoolean(channelRecord?.connected, record?.connected, record?.active) ??
+      fallback.connected,
+    messageCount:
+      firstNumber(record?.messageCount, record?.messagesCount, asRecord(record?.stats)?.messageCount) ??
+      fallback.messageCount ??
+      null,
+    tokenCount:
+      firstNumber(
+        record?.tokenCount,
+        record?.tokens,
+        asRecord(record?.usage)?.totalTokens,
+        asRecord(record?.stats)?.tokenCount
+      ) ??
+      fallback.tokenCount ??
+      null,
+    promptTokens:
+      firstNumber(record?.promptTokens, asRecord(record?.usage)?.promptTokens) ??
+      fallback.promptTokens ??
+      null,
+    completionTokens:
+      firstNumber(record?.completionTokens, asRecord(record?.usage)?.completionTokens) ??
+      fallback.completionTokens ??
+      null,
+    metadata: {
+      ...(fallback.metadata ?? {}),
+      ...(record ?? {}),
+    },
+  };
+}
+
+function normalizeNodePayload(value: Record<string, unknown> | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const agentRecord = asRecord(value.agent);
+  const id =
+    firstString(
+      value.id,
+      value.nodeId,
+      value.instanceId,
+      value.host,
+      value.hostname,
+      value.ip,
+      agentRecord?.id
+    ) ?? null;
+
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    label:
+      firstString(value.label, value.name, value.host, value.hostname, value.ip) ??
+      id,
+    status:
+      firstString(value.status, value.state, value.presence) ??
+      'unknown',
+    lastSeenAt:
+      firstString(value.lastSeenAt, value.updatedAt, value.timestamp) ?? null,
+    metadata: {
+      ...(value ?? {}),
+    },
+  } satisfies GatewayNodeSnapshot;
+}
+
 function createEmptyConversationResponse(agentId?: string, conversationId?: string) {
   return {
     id: conversationId ?? `pending:${agentId ?? 'conversation'}`,
@@ -1728,7 +2144,7 @@ function resolveOutgoingSessionKey(
   }
 
   if (input.agentId) {
-    return snapshot.sessionKeyByAgentId.get(input.agentId) ?? null;
+    return resolveDefaultSessionKeyForAgent(input.agentId, snapshot);
   }
 
   return null;
@@ -1856,15 +2272,186 @@ function mergeConversationMessage(
   };
 }
 
+function mergeSessionSnapshot(
+  current: GatewaySessionSnapshot | undefined,
+  next: GatewaySessionSnapshot
+) {
+  if (!current) {
+    return next;
+  }
+
+  return {
+    ...current,
+    ...next,
+    metadata: {
+      ...(current.metadata ?? {}),
+      ...(next.metadata ?? {}),
+    },
+  };
+}
+
+function compareSessionPreference(left: GatewaySessionSnapshot, right: GatewaySessionSnapshot) {
+  const leftRank = sessionPreferenceRank(left);
+  const rightRank = sessionPreferenceRank(right);
+
+  if (leftRank !== rightRank) {
+    return leftRank - rightRank;
+  }
+
+  return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+}
+
+function sessionPreferenceRank(session: GatewaySessionSnapshot) {
+  if (session.channelType === 'main' || session.channelType === 'direct') {
+    return 0;
+  }
+
+  if (session.status === 'running' || session.status === 'queued') {
+    return 1;
+  }
+
+  return 2;
+}
+
+function sessionToRun(
+  session: GatewaySessionSnapshot,
+  fallback: Partial<GatewayRunResponse> = {}
+): GatewayRunResponse {
+  const title =
+    firstString(
+      session.metadata.title,
+      session.metadata.name,
+      session.metadata.subject
+    ) ??
+    (session.channelLabel
+      ? `${session.channelLabel} session`
+      : session.channelType === 'main' || session.channelType === 'direct'
+        ? 'Direct session'
+        : 'Session activity');
+
+  return normalizeRunPayload(
+    {
+      id:
+        firstString(
+          session.metadata.runId,
+          session.metadata.id,
+          session.sessionKey
+        ) ?? session.sessionKey,
+      runId: firstString(session.metadata.runId),
+      agentId: session.agentId,
+      agentName: session.agentName ?? fallback.agentName,
+      sessionKey: session.sessionKey,
+      status: session.status,
+      title,
+      summary:
+        firstString(
+          session.metadata.summary,
+          session.metadata.description,
+          session.metadata.lastMessage,
+          session.metadata.preview
+        ) ??
+        (session.status === 'failed'
+          ? 'Recent session failed.'
+          : session.status === 'running' || session.status === 'queued'
+            ? 'Session is active.'
+            : 'Recent session activity.'),
+      createdAt: session.createdAt,
+      startedAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      durationMs: firstNumber(session.metadata.durationMs) ?? null,
+      errorMessage:
+        firstString(session.metadata.errorMessage, session.metadata.error) ?? null,
+      tokens: session.tokenCount ?? undefined,
+      metadata: {
+        ...session.metadata,
+        sessionKey: session.sessionKey,
+        channelType: session.channelType,
+        channelLabel: session.channelLabel,
+        channelIdentifier: session.channelIdentifier,
+        tokenCount: session.tokenCount,
+        promptTokens: session.promptTokens,
+        completionTokens: session.completionTokens,
+        messageCount: session.messageCount,
+      },
+    },
+    fallback
+  ) ?? {
+    id: session.sessionKey,
+    agentId: session.agentId,
+    agentName: session.agentName ?? fallback.agentName ?? '',
+    conversationId: session.sessionKey,
+    status: session.status,
+    title,
+    summary: 'Recent session activity.',
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    metadata: {
+      ...session.metadata,
+      sessionKey: session.sessionKey,
+    },
+  };
+}
+
+function resolveDefaultSessionKeyForAgent(agentId: string, snapshot: SnapshotState) {
+  return snapshot.sessionKeyByAgentId.get(agentId) ?? constructDefaultDirectSessionKey(agentId);
+}
+
+function constructDefaultDirectSessionKey(agentId: string) {
+  return `agent:${agentId}:main`;
+}
+
+function parseAgentIdFromSessionKey(sessionKey: string | null | undefined) {
+  if (!sessionKey) {
+    return null;
+  }
+
+  const match = /^agent:([^:]+):/u.exec(sessionKey);
+  return match?.[1] ?? null;
+}
+
+function inferChannelTypeFromSessionKey(sessionKey: string) {
+  const parts = sessionKey.split(':');
+
+  if (parts.length < 3) {
+    return null;
+  }
+
+  return parts[2] ?? null;
+}
+
+function inferChannelLabelFromSessionKey(sessionKey: string) {
+  const channelType = inferChannelTypeFromSessionKey(sessionKey);
+
+  if (!channelType) {
+    return null;
+  }
+
+  if (channelType === 'main') {
+    return 'Direct';
+  }
+
+  return channelType;
+}
+
+function cloneSessionSnapshot(session: GatewaySessionSnapshot): GatewaySessionSnapshot {
+  return {
+    ...session,
+    metadata: { ...session.metadata },
+  };
+}
+
 function createEmptySnapshotState(): SnapshotState {
   return {
     overview: null,
     agentsById: new Map(),
+    defaultAgentId: null,
     sessionKeyByAgentId: new Map(),
     agentIdBySessionKey: new Map(),
+    sessionsByKey: new Map(),
     conversationsBySessionKey: new Map(),
     runsById: new Map(),
     incidentsById: new Map(),
+    nodesById: new Map(),
   };
 }
 
@@ -1906,8 +2493,77 @@ function createAssistantMessage(input: {
   };
 }
 
+function mergeAgentChannels(
+  channels: GatewayAgentResponse['channels'] | undefined,
+  sessions: GatewaySessionSnapshot[]
+) {
+  const byId = new Map<string, NonNullable<GatewayAgentResponse['channels']>[number]>();
+
+  (channels ?? []).forEach((channel) => {
+    byId.set(channel.id, cloneChannel(channel));
+  });
+
+  sessions.forEach((session) => {
+    const channelId =
+      session.channelIdentifier ??
+      session.channelLabel ??
+      session.channelType ??
+      session.sessionKey;
+    const channelType = normalizeChannelType(session.channelType);
+
+    if (!channelId || !channelType) {
+      return;
+    }
+
+    byId.set(channelId, {
+      id: channelId,
+      type: channelType,
+      identifier: session.channelIdentifier ?? channelId,
+      label: session.channelLabel ?? channelType,
+      connected: session.connected ?? (session.status === 'running' || session.status === 'queued'),
+    });
+  });
+
+  return [...byId.values()];
+}
+
+function deriveAgentStatus(
+  agent: GatewayAgentResponse,
+  sessions: GatewaySessionSnapshot[]
+): AgentStatus {
+  if (sessions.some((session) => session.status === 'running' || session.status === 'queued')) {
+    return 'busy';
+  }
+
+  const latestSession = sessions[0];
+  if (latestSession?.status === 'failed' || latestSession?.status === 'degraded') {
+    return 'degraded';
+  }
+
+  if (sessions.length > 0) {
+    return 'online';
+  }
+
+  return agent.status ?? 'offline';
+}
+
 function sortAgents(items: GatewayAgentResponse[]) {
-  return items.sort((left, right) => left.name.localeCompare(right.name));
+  return items.sort((left, right) => {
+    const leftRank = left.isCoordinator || left.role === 'coordinator' ? 0 : 1;
+    const rightRank = right.isCoordinator || right.role === 'coordinator' ? 0 : 1;
+
+    if (leftRank !== rightRank) {
+      return leftRank - rightRank;
+    }
+
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function sortSessionSnapshots(items: GatewaySessionSnapshot[]) {
+  return items.sort((left, right) => {
+    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+  });
 }
 
 function sortRuns(items: GatewayRunResponse[]) {
@@ -2031,6 +2687,32 @@ function extractSessionKey(record: Record<string, unknown> | null | undefined) {
   );
 }
 
+function normalizeSessionStatus(
+  value: string | undefined,
+  record: Record<string, unknown> | null | undefined,
+  fallback: GatewaySessionSnapshot['status'] | undefined
+) {
+  if (value) {
+    if (value === 'active' || value === 'streaming' || value === 'processing') {
+      return 'running';
+    }
+
+    if (value === 'idle' || value === 'connected') {
+      return 'succeeded';
+    }
+  }
+
+  if (firstBoolean(record?.active, record?.connected, record?.isActive)) {
+    return 'running';
+  }
+
+  if (firstString(record?.errorMessage, record?.error)) {
+    return 'failed';
+  }
+
+  return normalizeRunStatus(value ?? fallback ?? 'succeeded');
+}
+
 function normalizeAgentStatus(value: string | AgentStatus | undefined) {
   switch (value) {
     case 'online':
@@ -2047,6 +2729,18 @@ function normalizeAgentStatus(value: string | AgentStatus | undefined) {
       return 'degraded';
     default:
       return 'offline';
+  }
+}
+
+function normalizeChannelType(value: string | null | undefined) {
+  switch (value) {
+    case 'discord':
+    case 'telegram':
+    case 'whatsapp':
+    case 'imessage':
+      return value;
+    default:
+      return null;
   }
 }
 
@@ -2160,6 +2854,10 @@ function normalizeStringArray(value: unknown) {
   }
 
   return items.filter((item): item is string => typeof item === 'string');
+}
+
+function dedupeStrings(items: (string | null | undefined)[]) {
+  return [...new Set(items.filter((item): item is string => typeof item === 'string' && item.length > 0))];
 }
 
 function dedupeById<T extends { id: string }>(items: T[]) {

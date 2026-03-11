@@ -118,7 +118,7 @@ export default React.memo(function CommandBar({ agents, onSend, onNavigateToAgen
               {selectedAgent && (
                 <View style={[styles.miniAvatar, { backgroundColor: accentColor.bg }]}>
                   <Text style={[styles.miniAvatarText, { color: accentColor.text }]}>
-                    {selectedAgent.name[0]}
+                    {selectedAgent.avatar ?? selectedAgent.name[0]}
                   </Text>
                 </View>
               )}
@@ -144,7 +144,7 @@ export default React.memo(function CommandBar({ agents, onSend, onNavigateToAgen
                   >
                     <View style={[styles.optionAvatar, { backgroundColor: color.bg }]}>
                       <Text style={[styles.optionAvatarText, { color: color.text }]}>
-                        {agent.name[0]}
+                        {agent.avatar ?? agent.name[0]}
                       </Text>
                     </View>
                     <View style={styles.optionInfo}>

@@ -87,6 +87,7 @@ export interface Incident {
 export interface Agent {
   id: string;
   name: string;
+  avatar?: string | null;
   status: AgentStatus;
   model: string;
   provider: string;
@@ -326,6 +327,7 @@ export interface GatewayConversationMessageResponse {
 export interface GatewayAgentResponse {
   id: string;
   name: string;
+  avatar?: string | null;
   status: AgentStatus;
   model?: string;
   provider?: string;

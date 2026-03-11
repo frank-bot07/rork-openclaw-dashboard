@@ -129,7 +129,7 @@ export default function DashboardScreen() {
                 <View style={styles.heroAgentInfo}>
                   <View style={[styles.heroAvatar, { backgroundColor: getAgentColor(primaryAgent.id).bg }]}>
                     <Text style={[styles.heroAvatarText, { color: getAgentColor(primaryAgent.id).text }]}>
-                      {primaryAgent.name[0]}
+                      {primaryAgent.avatar ?? primaryAgent.name[0]}
                     </Text>
                   </View>
                   <View>
@@ -229,7 +229,9 @@ export default function DashboardScreen() {
                 >
                   <View style={styles.agentRow}>
                     <View style={[styles.agentAvatar, { backgroundColor: accentColor.bg, borderColor: ringColor }]}>
-                      <Text style={[styles.agentAvatarText, { color: accentColor.text }]}>{agent.name[0]}</Text>
+                      <Text style={[styles.agentAvatarText, { color: accentColor.text }]}>
+                        {agent.avatar ?? agent.name[0]}
+                      </Text>
                     </View>
                     <View style={styles.agentInfo}>
                       <Text style={styles.agentName}>{agent.name}</Text>

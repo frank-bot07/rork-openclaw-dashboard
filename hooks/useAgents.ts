@@ -37,7 +37,7 @@ export function useAgents(client: OpenClawClient | null, filters?: AgentFilters)
     syncAgents();
 
     const unsubscribePush = client.subscribeToPushEvents((event) => {
-      if (event.event === 'presence' || event.event === 'agent') {
+      if (event.event === 'presence' || event.event === 'agent' || event.event === 'chat' || event.event === 'cron') {
         syncAgents();
       }
     });
@@ -60,7 +60,7 @@ export function useAgents(client: OpenClawClient | null, filters?: AgentFilters)
         throw new Error('No client');
       }
 
-      const raw = client.hasSnapshot() ? client.peekAgents(queryFilters) : await client.getAgents(queryFilters);
+      const raw = await client.getAgents(queryFilters);
       return raw.items.map(mapAgentSummary);
     },
     initialData: initialAgents ? initialAgents.items.map(mapAgentSummary) : undefined,

@@ -113,7 +113,9 @@ export default React.memo(function FloatingChatButton({ agents }: FloatingChatBu
                   onPress={() => handleSelectAgent(agent.id)}
                 >
                   <View style={[styles.pickerAvatar, { backgroundColor: color.bg }]}>
-                    <Text style={[styles.pickerAvatarText, { color: color.text }]}>{agent.name[0]}</Text>
+                    <Text style={[styles.pickerAvatarText, { color: color.text }]}>
+                      {agent.avatar ?? agent.name[0]}
+                    </Text>
                   </View>
                   <View style={styles.pickerAgentInfo}>
                     <Text style={styles.pickerAgentName}>{agent.name}</Text>
@@ -136,7 +138,9 @@ export default React.memo(function FloatingChatButton({ agents }: FloatingChatBu
                   onPress={() => handleSelectAgent(agent.id)}
                 >
                   <View style={[styles.pickerAvatar, { backgroundColor: color.bg }]}>
-                    <Text style={[styles.pickerAvatarText, { color: color.text }]}>{agent.name[0]}</Text>
+                    <Text style={[styles.pickerAvatarText, { color: color.text }]}>
+                      {agent.avatar ?? agent.name[0]}
+                    </Text>
                   </View>
                   <View style={styles.pickerAgentInfo}>
                     <Text style={styles.pickerAgentName}>{agent.name}</Text>

@@ -49,7 +49,7 @@ export function useOverview(client: OpenClawClient | null) {
         throw new Error('No client');
       }
 
-      const raw = client.peekOverview() ?? (await client.getOverview());
+      const raw = await client.getOverview();
       return mapGatewayOverview(raw);
     },
     initialData: initialOverview ? mapGatewayOverview(initialOverview) : undefined,
