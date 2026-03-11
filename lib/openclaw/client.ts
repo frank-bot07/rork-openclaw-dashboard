@@ -591,7 +591,7 @@ export class OpenClawClient {
             minProtocol: SUPPORTED_PROTOCOL_VERSION,
             maxProtocol: SUPPORTED_PROTOCOL_VERSION,
             client: {
-              id: 'openclaw-mobile',
+              id: 'openclaw-ios',
               version: this.config.clientVersion ?? '1.0.0',
               platform: Platform.OS,
               mode: 'ui',

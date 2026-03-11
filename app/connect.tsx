@@ -102,7 +102,15 @@ export default function ConnectScreen() {
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       router.replace('/(tabs)/(dashboard)');
     } catch (error) {
+      console.error('[Connect] Raw error:', error);
+      console.error('[Connect] Error type:', typeof error, error?.constructor?.name);
+      if (error && typeof error === 'object') {
+        console.error('[Connect] Error keys:', Object.keys(error));
+        console.error('[Connect] Error code:', (error as any).code);
+        console.error('[Connect] Error message:', (error as any).message);
+      }
       const nextError = toConnectionErrorMessage(error);
+      console.error('[Connect] Displayed error:', nextError);
       setErrorMessage(nextError);
 
       if (isUnauthorizedConnectionError(error)) {
