@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, Alert, Pressable, Switch,
+  View, Text, ScrollView, StyleSheet, Alert, Switch,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Server, LogOut, Wifi, WifiOff, RefreshCw, Moon, Bell, Shield } from 'lucide-react-native';

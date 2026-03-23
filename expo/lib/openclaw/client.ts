@@ -1,394 +1,196 @@
-import { Platform } from 'react-native';
 import { openClawAuth } from '@/lib/openclaw/auth';
+import { OpenClawClientDataStore, createEmptyConversationResponse, normalizeConversationHistory, normalizeRunPayload } from '@/lib/openclaw/client-data';
+import { OpenClawClientEvents } from '@/lib/openclaw/client-events';
+import { OpenClawClientRpc } from '@/lib/openclaw/client-rpc';
+import {
+  DEFAULT_RECONNECT_CONFIG,
+  DEFAULT_TIMEOUT_MS,
+  OpenClawClientError,
+  type OpenClawClientConfig,
+  type OpenClawClientRuntimeState,
+  type OpenClawConnectionListener,
+  type OpenClawPushEventListener,
+  type RequestOptions,
+} from '@/lib/openclaw/client-types';
+import { createId, isAuthError, normalizeBaseUrl, normalizeError } from '@/lib/openclaw/client-utils';
+import { OpenClawClientWebSocket } from '@/lib/openclaw/client-websocket';
 import type {
   AgentQuery,
-  AgentStatus,
-  ChannelType,
-  ConnectionState,
-  ConversationQuery,
-  GatewayActionResponse,
-  GatewayActivityResponse,
   GatewayAgentDetailResponse,
-  GatewayAgentResponse,
-  GatewayCapabilities,
-  GatewayCollectionResponse,
   GatewayConversationMessageResponse,
-  GatewayConversationResponse,
-  GatewayIncidentResponse,
   GatewayMessageSendResponse,
-  GatewayOverviewResponse,
-  GatewayRunResponse,
   IncidentsQuery,
   RunsQuery,
   SendMessageInput,
+  ConversationQuery,
 } from '@/types/openclaw';
 
-type AuthTokenResolver = () => Promise<string | null | undefined> | string | null | undefined;
-
-interface RequestOptions {
-  signal?: AbortSignal;
-  retryable?: boolean;
-  timeoutMs?: number;
-}
-
-export interface OpenClawReconnectConfig {
-  enabled: boolean;
-  baseDelayMs: number;
-  maxDelayMs: number;
-}
-
-export interface OpenClawClientConfig {
-  baseUrl: string;
-  authToken?: string | null;
-  getAuthToken?: AuthTokenResolver;
-  timeoutMs?: number;
-  reconnect?: Partial<OpenClawReconnectConfig>;
-  clientVersion?: string;
-  WebSocketImpl?: typeof WebSocket;
-  fetchImpl?: typeof fetch;
-  headers?: Record<string, string>;
-  retry?: number | Record<string, unknown>;
-}
-
-export interface OpenClawPushEventMessage {
-  type: 'event';
-  event: string;
-  payload: unknown;
-  seq?: number;
-}
-
-export interface OpenClawRpcResponseMessage {
-  type: 'res';
-  id: string;
-  ok: boolean;
-  payload?: unknown;
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-  };
-}
-
-export type OpenClawConnectionListener = (
-  state: ConnectionState,
-  error: OpenClawClientError | null
-) => void;
-
-export type OpenClawPushEventListener = (event: OpenClawPushEventMessage) => void;
-
-interface PendingRequest {
-  reject: (error: OpenClawClientError) => void;
-  resolve: (payload: unknown) => void;
-  timeoutId: ReturnType<typeof setTimeout>;
-  abortCleanup?: () => void;
-}
-
-interface SnapshotState {
-  overview: GatewayOverviewResponse | null;
-  agentsById: Map<string, GatewayAgentResponse>;
-  defaultAgentId: string | null;
-  sessionKeyByAgentId: Map<string, string>;
-  agentIdBySessionKey: Map<string, string>;
-  sessionsByKey: Map<string, GatewaySessionSnapshot>;
-  conversationsBySessionKey: Map<string, GatewayConversationResponse>;
-  runsById: Map<string, GatewayRunResponse>;
-  incidentsById: Map<string, GatewayIncidentResponse>;
-  nodesById: Map<string, GatewayNodeSnapshot>;
-}
-
-interface GatewaySessionSnapshot {
-  sessionKey: string;
-  agentId: string;
-  agentName?: string;
-  status: GatewayRunResponse['status'];
-  createdAt: string;
-  updatedAt: string;
-  model?: string;
-  provider?: string;
-  channelType?: string | null;
-  channelLabel?: string | null;
-  channelIdentifier?: string | null;
-  connected?: boolean;
-  messageCount?: number | null;
-  tokenCount?: number | null;
-  promptTokens?: number | null;
-  completionTokens?: number | null;
-  metadata: Record<string, unknown>;
-}
-
-interface GatewayNodeSnapshot {
-  id: string;
-  label: string;
-  status: string;
-  lastSeenAt: string | null;
-  metadata: Record<string, unknown>;
-}
-
-const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_RECONNECT_CONFIG: OpenClawReconnectConfig = {
-  enabled: true,
-  baseDelayMs: 750,
-  maxDelayMs: 30_000,
-};
-const DEFAULT_SCOPES = ['operator.admin', 'operator.approvals', 'operator.pairing'];
-const DEFAULT_CAPS = ['tool-events'];
-const SUPPORTED_PROTOCOL_VERSION = 3;
-const GATEWAY_DATA_REFRESH_INTERVAL_MS = 30_000;
-
-export class OpenClawClientError extends Error {
-  status?: number;
-  code?: string;
-  requestId?: string | null;
-  details?: unknown;
-
-  constructor(message: string, init: Partial<OpenClawClientError> = {}) {
-    super(message);
-    this.name = 'OpenClawClientError';
-    Object.assign(this, init);
-  }
-}
+export { OpenClawClientError } from './client-types';
+export type {
+  OpenClawClientConfig,
+  OpenClawConnectionListener,
+  OpenClawPushEventListener,
+  OpenClawPushEventMessage,
+  OpenClawReconnectConfig,
+  OpenClawRpcResponseMessage,
+} from './client-types';
 
 export class OpenClawClient {
-  private config: OpenClawClientConfig;
-  private reconnectConfig: OpenClawReconnectConfig;
-  private socket: WebSocket | null = null;
-  private pendingRequests = new Map<string, PendingRequest>();
-  private pushListeners = new Set<OpenClawPushEventListener>();
-  private connectionListeners = new Set<OpenClawConnectionListener>();
-  private snapshot: SnapshotState = createEmptySnapshotState();
-  private connectPromise: Promise<GatewayOverviewResponse> | null = null;
-  private connectPromiseResolve: ((overview: GatewayOverviewResponse) => void) | null = null;
-  private connectPromiseReject: ((error: OpenClawClientError) => void) | null = null;
-  private handshakeRequestId: string | null = null;
-  private handshakeTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  private reconnectTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  private lastConnectionError: OpenClawClientError | null = null;
-  private connectionState: ConnectionState = 'disconnected';
-  private instanceId = createId();
-  private reconnectAttempt = 0;
-  private hasConnectedAtLeastOnce = false;
-  private manuallyClosed = false;
-  private lastGatewayDataRefreshAt = 0;
-  private refreshGatewayDataPromise: Promise<void> | null = null;
+  private readonly state: OpenClawClientRuntimeState;
+  private readonly data: OpenClawClientDataStore;
+  private readonly events: OpenClawClientEvents;
+  private readonly rpc: OpenClawClientRpc;
+  private readonly websocket: OpenClawClientWebSocket;
 
   constructor(config: OpenClawClientConfig) {
-    this.config = {
-      ...config,
-      baseUrl: normalizeBaseUrl(config.baseUrl),
+    this.state = {
+      config: {
+        ...config,
+        baseUrl: normalizeBaseUrl(config.baseUrl),
+      },
+      reconnectConfig: {
+        ...DEFAULT_RECONNECT_CONFIG,
+        ...config.reconnect,
+      },
+      socket: null,
+      connectPromise: null,
+      connectPromiseResolve: null,
+      connectPromiseReject: null,
+      handshakeRequestId: null,
+      handshakeTimeoutId: null,
+      reconnectTimeoutId: null,
+      lastConnectionError: null,
+      connectionState: 'disconnected',
+      instanceId: createId(),
+      reconnectAttempt: 0,
+      hasConnectedAtLeastOnce: false,
+      manuallyClosed: false,
     };
-    this.reconnectConfig = {
-      ...DEFAULT_RECONNECT_CONFIG,
-      ...config.reconnect,
-    };
+
+    this.data = new OpenClawClientDataStore(
+      (method, params, options) => this.rpc.sendRequest(method, params, options),
+      () => this.state.connectionState
+    );
+    this.events = new OpenClawClientEvents({
+      data: this.data,
+      getConnectionState: () => this.state.connectionState,
+      getConnectionError: () => this.state.lastConnectionError,
+    });
+    this.rpc = new OpenClawClientRpc({
+      getSocket: () => this.state.socket,
+      getTimeoutMs: () => this.state.config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      onAuthError: (error) => {
+        if (isAuthError(error.code)) {
+          void openClawAuth.expireSession(error.message);
+        }
+      },
+    });
+    this.websocket = new OpenClawClientWebSocket({
+      state: this.state,
+      data: this.data,
+      events: this.events,
+      rpc: this.rpc,
+    });
   }
 
   configure(nextConfig: Partial<OpenClawClientConfig>) {
-    this.config = {
-      ...this.config,
+    this.state.config = {
+      ...this.state.config,
       ...nextConfig,
-      baseUrl: nextConfig.baseUrl ? normalizeBaseUrl(nextConfig.baseUrl) : this.config.baseUrl,
+      baseUrl: nextConfig.baseUrl
+        ? normalizeBaseUrl(nextConfig.baseUrl)
+        : this.state.config.baseUrl,
     };
-    this.reconnectConfig = {
-      ...this.reconnectConfig,
+    this.state.reconnectConfig = {
+      ...this.state.reconnectConfig,
       ...nextConfig.reconnect,
     };
   }
 
   getConnectionState() {
-    return this.connectionState;
+    return this.state.connectionState;
   }
 
   getConnectionError() {
-    return this.lastConnectionError;
+    return this.state.lastConnectionError;
   }
 
   hasSnapshot() {
-    return Boolean(this.snapshot.overview);
+    return this.data.hasSnapshot();
   }
 
   subscribeToConnectionState(listener: OpenClawConnectionListener) {
-    this.connectionListeners.add(listener);
-    listener(this.connectionState, this.lastConnectionError);
-
-    return () => {
-      this.connectionListeners.delete(listener);
-    };
+    return this.events.subscribeToConnectionState(listener);
   }
 
   subscribeToPushEvents(listener: OpenClawPushEventListener) {
-    this.pushListeners.add(listener);
-
-    return () => {
-      this.pushListeners.delete(listener);
-    };
+    return this.events.subscribeToPushEvents(listener);
   }
 
   async connect() {
-    if (this.snapshot.overview && this.connectionState === 'connected') {
-      return cloneOverview(this.snapshot.overview);
-    }
-
-    if (this.connectPromise) {
-      return this.connectPromise;
-    }
-
-    const WebSocketImpl = this.getWebSocketImpl();
-    if (!WebSocketImpl) {
-      throw new OpenClawClientError('WebSocket is unavailable in this environment.', {
-        code: 'WS_UNAVAILABLE',
-      });
-    }
-
-    this.manuallyClosed = false;
-    this.clearReconnectTimer();
-
-    this.connectPromise = new Promise<GatewayOverviewResponse>((resolve, reject) => {
-      this.connectPromiseResolve = resolve;
-      this.connectPromiseReject = reject;
-
-      try {
-        const socket = new WebSocketImpl(toWebSocketUrl(this.config.baseUrl));
-        this.socket = socket;
-        this.setConnectionState(this.hasConnectedAtLeastOnce ? 'reconnecting' : 'connecting');
-
-        socket.onopen = () => {
-          this.armHandshakeTimeout('Timed out waiting for gateway auth challenge.');
-        };
-
-        socket.onmessage = (message) => {
-          void this.handleSocketMessage(message.data);
-        };
-
-        socket.onerror = () => {
-          if (!this.lastConnectionError) {
-            this.lastConnectionError = new OpenClawClientError('WebSocket connection failed.', {
-              code: 'WS_ERROR',
-            });
-          }
-        };
-
-        socket.onclose = (event) => {
-          this.handleSocketClose(event);
-        };
-      } catch (error) {
-        const normalized = normalizeError(error, 'Failed to create WebSocket connection.');
-        this.rejectConnectPromise(normalized);
-        this.scheduleReconnect(normalized);
-      }
-    });
-
-    return this.connectPromise;
+    return this.websocket.connect();
   }
 
   disconnect(reason = 'Client closed connection.') {
-    this.manuallyClosed = true;
-    this.clearReconnectTimer();
-    this.clearHandshakeTimeout();
-    this.handshakeRequestId = null;
-    this.rejectAllPendingRequests(
-      new OpenClawClientError(reason, {
-        code: 'WS_CLOSED',
-      })
-    );
-
-    if (this.socket) {
-      const socket = this.socket;
-      this.socket = null;
-
-      if (socket.readyState === socket.OPEN || socket.readyState === socket.CONNECTING) {
-        socket.close();
-      }
-    }
-
-    this.rejectConnectPromise(
-      new OpenClawClientError(reason, {
-        code: 'WS_CLOSED',
-      })
-    );
-    this.setConnectionState('disconnected');
+    this.websocket.disconnect(reason);
   }
 
   peekOverview() {
-    return this.snapshot.overview ? cloneOverview(this.snapshot.overview) : null;
+    return this.data.peekOverview();
   }
 
   peekAgent(agentId: string) {
-    const agent = this.buildAgentSnapshot(agentId);
-    return agent ? cloneAgent(agent) : null;
+    return this.data.peekAgent(agentId);
   }
 
-  peekAgents(query?: AgentQuery): GatewayCollectionResponse<GatewayAgentResponse> {
-    const items = filterAgents(this.collectAgentSnapshots(), query);
-
-    return {
-      items,
-      total: items.length,
-    };
+  peekAgents(query?: AgentQuery) {
+    return this.data.peekAgents(query);
   }
 
   peekConversation(query: ConversationQuery) {
-    const sessionKey = this.resolveSessionKey(query);
-
-    if (!sessionKey) {
-      return null;
-    }
-
-    const conversation = this.snapshot.conversationsBySessionKey.get(sessionKey);
-    return conversation ? cloneConversation(conversation) : null;
+    return this.data.peekConversation(query);
   }
 
-  peekRuns(query?: RunsQuery): GatewayCollectionResponse<GatewayRunResponse> {
-    const items = filterRuns([...this.snapshot.runsById.values()].map(cloneRun), query);
-
-    return {
-      items,
-      total: items.length,
-    };
+  peekRuns(query?: RunsQuery) {
+    return this.data.peekRuns(query);
   }
 
-  peekIncidents(query?: IncidentsQuery): GatewayCollectionResponse<GatewayIncidentResponse> {
-    const items = filterIncidents(
-      [...this.snapshot.incidentsById.values()].map(cloneIncident),
-      query
-    );
-
-    return {
-      items,
-      total: items.length,
-    };
+  peekIncidents(query?: IncidentsQuery) {
+    return this.data.peekIncidents(query);
   }
 
   getConversationKeyForAgent(agentId: string) {
-    return resolveDefaultSessionKeyForAgent(agentId, this.snapshot);
+    return this.data.getConversationKeyForAgent(agentId);
   }
 
   getAgentIdForConversation(sessionKey: string) {
-    return this.snapshot.agentIdBySessionKey.get(sessionKey) ?? null;
+    return this.data.getAgentIdForConversation(sessionKey);
   }
 
-  async getOverview(_signal?: AbortSignal) {
+  async getOverview(signal?: AbortSignal) {
     await this.connect();
-    await this.refreshGatewayData();
+    await this.data.refreshGatewayData(signal);
 
-    if (!this.snapshot.overview) {
+    const overview = this.data.peekOverview();
+    if (!overview) {
       throw new OpenClawClientError('Gateway hello snapshot was not available after connect.', {
         code: 'HELLO_MISSING',
       });
     }
 
-    return cloneOverview(this.snapshot.overview);
+    return overview;
   }
 
-  async getAgents(query?: AgentQuery, _signal?: AbortSignal) {
+  async getAgents(query?: AgentQuery, signal?: AbortSignal) {
     await this.connect();
-    await this.refreshGatewayData();
+    await this.data.refreshGatewayData(signal);
     return this.peekAgents(query);
   }
 
-  async getAgent(agentId: string, _signal?: AbortSignal) {
+  async getAgent(agentId: string, signal?: AbortSignal) {
     await this.connect();
-    await this.refreshGatewayData();
-    const agent = this.buildAgentSnapshot(agentId);
+    await this.data.refreshGatewayData(signal);
+    const agent = this.data.peekAgent(agentId);
 
     if (!agent) {
       throw new OpenClawClientError('Agent not found.', {
@@ -397,13 +199,11 @@ export class OpenClawClient {
       });
     }
 
-    const recentRuns = filterRuns([...this.snapshot.runsById.values()].map(cloneRun), { agentId });
-    const incidents = filterIncidents([...this.snapshot.incidentsById.values()].map(cloneIncident), {
-      agentId,
-    });
+    const recentRuns = this.data.peekRuns({ agentId }).items;
+    const incidents = this.data.peekIncidents({ agentId }).items;
 
     return {
-      ...cloneAgent(agent),
+      ...agent,
       recentRuns,
       incidents,
       systemPrompt: '',
@@ -412,30 +212,34 @@ export class OpenClawClient {
 
   async getConversation(query: ConversationQuery, signal?: AbortSignal) {
     await this.connect();
-    const sessionKey = this.resolveSessionKey(query);
+    const sessionKey = this.data.resolveSessionKey(query);
 
     if (!sessionKey) {
       return createEmptyConversationResponse(query.agentId, query.conversationId);
     }
 
-    const payload = await this.request('chat.history', {
-      sessionKey,
-      limit: query.limit ?? 100,
-    }, {
-      signal,
-      retryable: false,
-    });
+    const payload = await this.request(
+      'chat.history',
+      {
+        sessionKey,
+        limit: query.limit ?? 100,
+      },
+      {
+        signal,
+        retryable: false,
+      }
+    );
 
     const agentId = this.getAgentIdForConversation(sessionKey) ?? query.agentId ?? '';
     const conversation = normalizeConversationHistory(payload, sessionKey, agentId);
-    this.upsertConversation(conversation);
+    this.data.upsertConversation(conversation);
 
-    return cloneConversation(this.snapshot.conversationsBySessionKey.get(sessionKey) ?? conversation);
+    return this.data.peekConversation({ conversationId: sessionKey }) ?? conversation;
   }
 
   async sendMessage(input: SendMessageInput, signal?: AbortSignal) {
     await this.connect();
-    const sessionKey = resolveOutgoingSessionKey(input, this.snapshot);
+    const sessionKey = this.data.resolveOutgoingSessionKey(input);
 
     if (!sessionKey) {
       throw new OpenClawClientError('A conversationId or agentId is required.', {
@@ -458,25 +262,31 @@ export class OpenClawClient {
       metadata: input.metadata,
     };
 
-    const runPayload = await this.request('chat.send', {
-      sessionKey,
-      message: input.content,
-      deliver: false,
-      idempotencyKey,
-    }, {
-      signal,
-      retryable: false,
-    });
+    const runPayload = await this.request(
+      'chat.send',
+      {
+        sessionKey,
+        message: input.content,
+        deliver: false,
+        idempotencyKey,
+      },
+      {
+        signal,
+        retryable: false,
+      }
+    );
 
-    this.upsertConversationMessage(sessionKey, userMessage);
-    this.upsertRun(normalizeRunPayload(runPayload, {
-      agentId,
-      conversationId: sessionKey,
-      title: 'Chat response',
-      summary: 'Run started from operator message.',
-      status: 'queued',
-      createdAt: timestamp,
-    }));
+    this.data.upsertConversationMessage(sessionKey, userMessage);
+    this.data.upsertRun(
+      normalizeRunPayload(runPayload, {
+        agentId,
+        conversationId: sessionKey,
+        title: 'Chat response',
+        summary: 'Run started from operator message.',
+        status: 'queued',
+        createdAt: timestamp,
+      })
+    );
 
     return {
       conversationId: sessionKey,
@@ -487,7 +297,7 @@ export class OpenClawClient {
 
   async getRuns(query?: RunsQuery, signal?: AbortSignal) {
     await this.connect();
-    await this.refreshGatewayData(signal);
+    await this.data.refreshGatewayData(signal);
     return this.peekRuns(query);
   }
 
@@ -496,916 +306,31 @@ export class OpenClawClient {
     return this.peekIncidents(query);
   }
 
-  async retryRun(_runId: string, _signal?: AbortSignal) {
-    throw unsupportedActionError('retryRun');
-  }
-
-  async restartAgent(_agentId: string, _signal?: AbortSignal) {
-    throw unsupportedActionError('restartAgent');
-  }
-
-  async pingAgent(_agentId: string, _signal?: AbortSignal) {
-    throw unsupportedActionError('pingAgent');
-  }
-
-  private async request(method: string, params: Record<string, unknown>, options: RequestOptions = {}) {
+  async retryRun(runId: string, signal?: AbortSignal) {
     await this.connect();
-    return this.sendRequest(method, params, options);
+    await this.request('runs.retry', { runId }, { signal });
   }
 
-  private async sendRequest(
+  async restartAgent(agentId: string, signal?: AbortSignal) {
+    await this.connect();
+    await this.request('agents.restart', { agentId }, { signal });
+  }
+
+  async pingAgent(agentId: string, signal?: AbortSignal) {
+    await this.connect();
+    await this.request('agents.ping', { agentId }, { signal });
+  }
+
+  private async request(
     method: string,
     params: Record<string, unknown>,
     options: RequestOptions = {}
   ) {
-    const socket = this.socket;
-    if (!socket || socket.readyState !== socket.OPEN) {
-      throw new OpenClawClientError('Gateway connection is not ready.', {
-        code: 'WS_NOT_CONNECTED',
-      });
-    }
-
-    if (options.signal?.aborted) {
-      throw new OpenClawClientError('Request aborted.', {
-        code: 'AbortError',
-      });
-    }
-
-    const id = createId();
-    const timeoutMs = options.timeoutMs ?? this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-
-    return new Promise<unknown>((resolve, reject) => {
-      const abortListener = () => {
-        this.clearPendingRequest(id);
-        reject(
-          new OpenClawClientError('Request aborted.', {
-            code: 'AbortError',
-          })
-        );
-      };
-
-      const timeoutId = setTimeout(() => {
-        this.clearPendingRequest(id);
-        reject(
-          new OpenClawClientError(`Request timed out after ${timeoutMs}ms.`, {
-            code: 'REQUEST_TIMEOUT',
-          })
-        );
-      }, timeoutMs);
-
-      if (options.signal) {
-        options.signal.addEventListener('abort', abortListener, { once: true });
-      }
-
-      this.pendingRequests.set(id, {
-        resolve,
-        reject,
-        timeoutId,
-        abortCleanup: options.signal
-          ? () => options.signal?.removeEventListener('abort', abortListener)
-          : undefined,
-      });
-
-      try {
-        socket.send(
-          JSON.stringify({
-            type: 'req',
-            id,
-            method,
-            params,
-          })
-        );
-      } catch (error) {
-        this.clearPendingRequest(id);
-        reject(normalizeError(error, `Failed to send ${method} request.`));
-      }
-    });
-  }
-
-  private async handleSocketMessage(data: unknown) {
-    const message = parseSocketMessage(data);
-
-    if (!message) {
-      return;
-    }
-
-    if (message.type === 'event') {
-      if (message.event === 'connect.challenge') {
-        await this.handleConnectChallenge();
-        return;
-      }
-
-      this.applyPushEvent(message);
-      this.emitPushEvent(message);
-      return;
-    }
-
-    this.handleResponse(message);
-  }
-
-  private async handleConnectChallenge() {
-    if (!this.socket || this.socket.readyState !== this.socket.OPEN || this.handshakeRequestId) {
-      return;
-    }
-
     try {
-      const authToken = await resolveAuthToken(this.config);
-
-      if (!authToken) {
-        throw new OpenClawClientError('Operator token is required.', {
-          code: 'AUTH_TOKEN_MISSING',
-        });
-      }
-
-      const requestId = createId();
-      this.handshakeRequestId = requestId;
-      this.armHandshakeTimeout('Timed out waiting for gateway hello response.');
-      this.socket.send(
-        JSON.stringify({
-          type: 'req',
-          id: requestId,
-          method: 'connect',
-          params: {
-            minProtocol: SUPPORTED_PROTOCOL_VERSION,
-            maxProtocol: SUPPORTED_PROTOCOL_VERSION,
-            client: {
-              id: 'openclaw-ios',
-              version: this.config.clientVersion ?? '1.0.0',
-              platform: Platform.OS,
-              mode: 'ui',
-              instanceId: this.instanceId,
-            },
-            role: 'operator',
-            scopes: DEFAULT_SCOPES,
-            auth: {
-              token: authToken,
-            },
-            caps: DEFAULT_CAPS,
-          },
-        })
-      );
+      return await this.rpc.request(() => this.connect(), method, params, options);
     } catch (error) {
-      const normalized = normalizeError(error, 'Failed to authenticate with the gateway.');
-      this.lastConnectionError = normalized;
-      if (isAuthError(normalized.code)) {
-        await openClawAuth.expireSession(normalized.message);
-      }
-      this.rejectConnectPromise(normalized);
-      this.socket?.close();
+      throw normalizeError(error, `${method} request failed.`);
     }
-  }
-
-  private handleResponse(message: OpenClawRpcResponseMessage) {
-    if (message.id === this.handshakeRequestId) {
-      this.clearHandshakeTimeout();
-      this.handshakeRequestId = null;
-
-      if (!message.ok) {
-        const error = rpcResponseToError(message, 'Gateway authentication failed.');
-        this.lastConnectionError = error;
-        this.rejectConnectPromise(error);
-
-        if (isAuthError(error.code)) {
-          void openClawAuth.expireSession(error.message);
-        }
-
-        this.socket?.close();
-        return;
-      }
-
-      const overview = normalizeHelloPayload(message.payload, this.config.baseUrl);
-      this.replaceOverviewSnapshot(overview);
-      this.lastConnectionError = null;
-      this.reconnectAttempt = 0;
-      this.hasConnectedAtLeastOnce = true;
-      this.setConnectionState('connected');
-      void this.bootstrapGatewayData()
-        .catch((error) => {
-          const normalized = normalizeError(error, 'Failed to load gateway data.');
-          console.error('[OpenClaw] Failed to bootstrap gateway data.', normalized);
-        })
-        .finally(() => {
-          this.resolveConnectPromise(this.snapshot.overview ?? overview);
-        });
-      return;
-    }
-
-    const pending = this.pendingRequests.get(message.id);
-    if (!pending) {
-      return;
-    }
-
-    this.clearPendingRequest(message.id);
-
-    if (!message.ok) {
-      const error = rpcResponseToError(message, 'Gateway request failed.');
-
-      if (isAuthError(error.code)) {
-        void openClawAuth.expireSession(error.message);
-      }
-
-      pending.reject(error);
-      return;
-    }
-
-    pending.resolve(message.payload);
-  }
-
-  private handleSocketClose(event: CloseEvent) {
-    const error =
-      this.lastConnectionError ??
-      new OpenClawClientError(event.reason || 'Gateway connection closed.', {
-        code: resolveSocketCloseCode(event.code),
-      });
-
-    this.socket = null;
-    this.handshakeRequestId = null;
-    this.clearHandshakeTimeout();
-    this.rejectAllPendingRequests(error);
-
-    if (this.connectionState !== 'connected') {
-      this.rejectConnectPromise(error);
-    }
-
-    if (this.manuallyClosed) {
-      this.setConnectionState('disconnected');
-      return;
-    }
-
-    if (isAuthError(error.code)) {
-      this.setConnectionState('unauthorized', error);
-      return;
-    }
-
-    this.scheduleReconnect(error);
-  }
-
-  private scheduleReconnect(error: OpenClawClientError) {
-    if (!this.reconnectConfig.enabled || this.manuallyClosed) {
-      this.setConnectionState('disconnected', error);
-      return;
-    }
-
-    this.clearReconnectTimer();
-    this.reconnectAttempt += 1;
-    const delayMs = Math.min(
-      this.reconnectConfig.baseDelayMs * 2 ** Math.max(this.reconnectAttempt - 1, 0),
-      this.reconnectConfig.maxDelayMs
-    );
-    this.setConnectionState('reconnecting', error);
-
-    this.reconnectTimeoutId = setTimeout(() => {
-      this.reconnectTimeoutId = null;
-      void this.connect().catch((nextError) => {
-        const normalized = normalizeError(nextError, 'Gateway reconnect attempt failed.');
-        this.lastConnectionError = normalized;
-        this.scheduleReconnect(normalized);
-      });
-    }, delayMs);
-  }
-
-  private applyPushEvent(event: OpenClawPushEventMessage) {
-    switch (event.event) {
-      case 'presence':
-        this.applyPresencePayload(event.payload);
-        break;
-      case 'agent':
-        this.applyAgentPayload(event.payload);
-        break;
-      case 'chat':
-        this.applyChatPayload(event.payload);
-        break;
-      case 'cron':
-        this.applyCronPayload(event.payload);
-        break;
-      default:
-        break;
-    }
-
-    this.syncOverviewCollections();
-  }
-
-  private emitPushEvent(event: OpenClawPushEventMessage) {
-    this.pushListeners.forEach((listener) => {
-      listener(event);
-    });
-  }
-
-  private applyPresencePayload(payload: unknown) {
-    const root = asRecord(payload);
-    const entries = getArray(root?.presence) ?? (Array.isArray(payload) ? payload : [payload]);
-
-    for (const entry of entries) {
-      const record = asRecord(entry);
-      const node = normalizeNodePayload(record);
-
-      if (node) {
-        this.snapshot.nodesById.set(node.id, node);
-      }
-    }
-  }
-
-  private applyAgentPayload(payload: unknown) {
-    const root = asRecord(asRecord(payload)?.agent) ?? asRecord(payload);
-    const agentId = firstString(root?.id, root?.agentId);
-    const existing = agentId ? this.snapshot.agentsById.get(agentId) : undefined;
-    const agent = normalizeAgentPayload(root, existing);
-
-    if (agent) {
-      this.upsertAgent(agent);
-    }
-
-    const run = normalizeRunPayload(root?.currentRun ?? root?.run ?? root?.latestRun, {
-      agentId: agent?.id ?? existing?.id ?? '',
-      conversationId: agent?.conversationId ?? existing?.conversationId ?? null,
-    });
-
-    if (run) {
-      this.upsertRun(run);
-    }
-
-    const incident = normalizeIncidentPayload(root?.incident ?? root?.latestIncident);
-    if (incident) {
-      this.upsertIncident(incident);
-    }
-  }
-
-  private applyChatPayload(payload: unknown) {
-    const root = asRecord(payload);
-    const sessionKey = extractSessionKey(root);
-
-    if (!sessionKey) {
-      return;
-    }
-
-    const agentId =
-      firstString(root?.agentId) ??
-      this.snapshot.agentIdBySessionKey.get(sessionKey) ??
-      this.findAgentIdByConversationId(sessionKey) ??
-      '';
-    const conversation = ensureConversation(this.snapshot.conversationsBySessionKey.get(sessionKey), {
-      id: sessionKey,
-      agentId,
-      agentName: agentId ? this.snapshot.agentsById.get(agentId)?.name : undefined,
-    });
-
-    const state = firstString(root?.state, root?.phase) ?? 'final';
-    const messageRoot = asRecord(root?.message);
-    const createdAt = firstString(root?.createdAt, messageRoot?.createdAt) ?? new Date().toISOString();
-
-    this.upsertSession(
-      normalizeSessionPayload(root, {
-        agentId,
-        agentName: agentId ? this.buildAgentSnapshot(agentId)?.name : undefined,
-        status: mapChatStateToRunStatus(state),
-        createdAt,
-        updatedAt: createdAt,
-        sessionKey,
-      })
-    );
-
-    if (state === 'delta') {
-      const messageId =
-        firstString(messageRoot?.id, messageRoot?.messageId, root?.messageId) ??
-        `stream:${sessionKey}:${firstString(root?.runId) ?? 'run'}`;
-      const delta =
-        firstString(messageRoot?.delta, root?.delta, messageRoot?.content) ??
-        (typeof root?.message === 'string' ? root.message : '');
-
-      const currentMessage =
-        conversation.messages.find((message) => message.id === messageId) ??
-        createAssistantMessage({
-          id: messageId,
-          agentId,
-          conversationId: sessionKey,
-          runId: firstString(root?.runId) ?? null,
-          content: '',
-          status: 'streaming',
-        });
-
-        this.upsertConversationMessage(sessionKey, {
-          ...currentMessage,
-          content: `${currentMessage.content}${delta}`,
-          createdAt,
-          runId: firstString(messageRoot?.runId, root?.runId) ?? currentMessage.runId ?? null,
-          status: 'streaming',
-        });
-    } else if (state === 'final') {
-      const message = normalizeConversationMessage(messageRoot ?? root, agentId, sessionKey, 'assistant');
-
-      if (message) {
-        this.upsertConversationMessage(sessionKey, {
-          ...message,
-          status: 'complete',
-        });
-      }
-    } else if (state === 'error' || state === 'aborted') {
-      const errorMessage = firstString(root?.errorMessage, root?.message, root?.reason);
-
-      this.upsertConversationMessage(
-        sessionKey,
-        normalizeConversationMessage(
-          {
-            id: `system:${sessionKey}:${firstString(root?.runId) ?? createId()}`,
-            agentId,
-            role: 'system',
-            content: errorMessage ?? (state === 'aborted' ? 'Run aborted.' : 'Run failed.'),
-            createdAt: firstString(root?.createdAt) ?? new Date().toISOString(),
-            conversationId: sessionKey,
-            runId: firstString(root?.runId) ?? null,
-            status: 'failed',
-          },
-          agentId,
-          sessionKey
-        )
-      );
-    }
-
-    const run = normalizeRunPayload(root?.run ?? root, {
-      agentId,
-      conversationId: sessionKey,
-      title: 'Chat response',
-      summary:
-        state === 'error'
-          ? 'Run failed.'
-          : state === 'aborted'
-            ? 'Run aborted.'
-            : state === 'final'
-              ? 'Run completed.'
-              : 'Run in progress.',
-      status: mapChatStateToRunStatus(state),
-      createdAt,
-    });
-
-    if (run) {
-      this.upsertRun(run);
-    }
-  }
-
-  private applyCronPayload(payload: unknown) {
-    const root = asRecord(payload);
-    const runs = [
-      ...collectNormalizedRuns(root?.run),
-      ...collectNormalizedRuns(root?.runs),
-      ...collectNormalizedRuns(root?.latestRun),
-    ];
-    const incidents = [
-      ...collectNormalizedIncidents(root?.incident),
-      ...collectNormalizedIncidents(root?.incidents),
-    ];
-
-    runs.forEach((run) => this.upsertRun(run));
-    incidents.forEach((incident) => this.upsertIncident(incident));
-  }
-
-  private replaceOverviewSnapshot(overview: GatewayOverviewResponse) {
-    this.snapshot = createEmptySnapshotState();
-    this.snapshot.overview = cloneOverview(overview);
-
-    for (const agent of overview.agents ?? []) {
-      const normalizedAgent = normalizeAgentPayload(agent);
-      if (normalizedAgent) {
-        this.upsertAgent(normalizedAgent);
-      }
-    }
-
-    for (const run of overview.recentRuns ?? []) {
-      this.upsertRun(normalizeRunPayload(run));
-    }
-
-    for (const incident of overview.incidents ?? []) {
-      this.upsertIncident(normalizeIncidentPayload(incident));
-    }
-
-    this.syncOverviewCollections();
-  }
-
-  private syncOverviewCollections() {
-    if (!this.snapshot.overview) {
-      return;
-    }
-
-    const agents = sortAgents(this.collectAgentSnapshots());
-    const recentRuns = sortRuns([...this.snapshot.runsById.values()].map(cloneRun));
-    const incidents = sortIncidents([...this.snapshot.incidentsById.values()].map(cloneIncident));
-    const existingStats = this.snapshot.overview.stats ?? {};
-    const gateway = this.snapshot.overview.gateway;
-
-    this.snapshot.overview = {
-      ...this.snapshot.overview,
-      gateway: {
-        ...gateway,
-        online: this.connectionState === 'connected',
-        capabilities: {
-          ...gateway.capabilities,
-        },
-      },
-      coordinator:
-        agents.find((agent) => agent.id === this.snapshot.defaultAgentId) ??
-        agents.find((agent) => agent.isCoordinator || agent.role === 'coordinator') ??
-        this.snapshot.overview.coordinator ??
-        null,
-      agents,
-      recentRuns,
-      incidents,
-      stats: {
-        ...existingStats,
-        totalAgents: agents.length,
-        onlineAgents: agents.filter((agent) => agent.status !== 'offline').length,
-        openIncidents: incidents.filter((incident) => incident.status !== 'resolved').length,
-        activeRuns: recentRuns.filter((run) => run.status === 'queued' || run.status === 'running').length,
-      },
-    };
-  }
-
-  private upsertAgent(agent: GatewayAgentResponse) {
-    const existing = this.snapshot.agentsById.get(agent.id);
-    const merged = mergeAgent(existing, agent);
-    this.snapshot.agentsById.set(merged.id, merged);
-
-    const sessionKey = merged.conversationId ?? null;
-    if (sessionKey) {
-      this.snapshot.sessionKeyByAgentId.set(merged.id, sessionKey);
-      this.snapshot.agentIdBySessionKey.set(sessionKey, merged.id);
-    }
-
-    if (merged.currentRun) {
-      this.upsertRun(merged.currentRun);
-    }
-  }
-
-  private upsertRun(run: GatewayRunResponse | null) {
-    if (!run?.id) {
-      return;
-    }
-
-    const normalizedRun =
-      !run.agentName && run.agentId
-        ? {
-            ...run,
-            agentName: this.buildAgentSnapshot(run.agentId)?.name ?? run.agentName ?? '',
-          }
-        : run;
-    const existing = this.snapshot.runsById.get(run.id);
-    const merged = mergeRun(existing, normalizedRun);
-    this.snapshot.runsById.set(merged.id, merged);
-  }
-
-  private upsertIncident(incident: GatewayIncidentResponse | null) {
-    if (!incident?.id) {
-      return;
-    }
-
-    const existing = this.snapshot.incidentsById.get(incident.id);
-    const merged = mergeIncident(existing, incident);
-    this.snapshot.incidentsById.set(merged.id, merged);
-  }
-
-  private upsertConversation(conversation: GatewayConversationResponse) {
-    const existing = this.snapshot.conversationsBySessionKey.get(conversation.id);
-    const merged = mergeConversation(existing, conversation);
-    this.snapshot.conversationsBySessionKey.set(merged.id, merged);
-
-    if (merged.agentId) {
-      this.snapshot.agentIdBySessionKey.set(merged.id, merged.agentId);
-      this.snapshot.sessionKeyByAgentId.set(merged.agentId, merged.id);
-    }
-
-    if (merged.latestRun) {
-      this.upsertRun(merged.latestRun);
-    }
-  }
-
-  private upsertConversationMessage(
-    sessionKey: string,
-    message: GatewayConversationMessageResponse | null
-  ) {
-    if (!message) {
-      return;
-    }
-
-    const existing = ensureConversation(this.snapshot.conversationsBySessionKey.get(sessionKey), {
-      id: sessionKey,
-      agentId: message.agentId,
-      agentName: message.agentId ? this.snapshot.agentsById.get(message.agentId)?.name : undefined,
-    });
-    const byId = new Map(existing.messages.map((entry) => [entry.id, entry]));
-    byId.set(message.id, mergeConversationMessage(byId.get(message.id), message));
-    const nextConversation: GatewayConversationResponse = {
-      ...existing,
-      id: sessionKey,
-      agentId: existing.agentId || message.agentId,
-      messages: sortConversationMessages([...byId.values()].map(cloneMessage)),
-      nextCursor: message.createdAt,
-    };
-
-    this.upsertConversation(nextConversation);
-  }
-
-  private resolveSessionKey(query: ConversationQuery) {
-    if (query.conversationId && !query.conversationId.startsWith('pending:')) {
-      return query.conversationId;
-    }
-
-    if (query.agentId) {
-      return resolveDefaultSessionKeyForAgent(query.agentId, this.snapshot);
-    }
-
-    return null;
-  }
-
-  private findAgentIdByConversationId(sessionKey: string) {
-    return this.snapshot.agentIdBySessionKey.get(sessionKey) ?? null;
-  }
-
-  private async bootstrapGatewayData() {
-    await this.refreshGatewayData(undefined, true);
-  }
-
-  private async refreshGatewayData(signal?: AbortSignal, force = false) {
-    if (
-      !force &&
-      Date.now() - this.lastGatewayDataRefreshAt < GATEWAY_DATA_REFRESH_INTERVAL_MS &&
-      this.snapshot.agentsById.size > 0
-    ) {
-      return;
-    }
-
-    if (this.refreshGatewayDataPromise) {
-      return this.refreshGatewayDataPromise;
-    }
-
-    this.refreshGatewayDataPromise = (async () => {
-      const agentsPayload = await this.sendRequest('agents.list', {}, { signal, retryable: false });
-      const agentList = normalizeAgentsListPayload(agentsPayload);
-      const defaultAgentId = agentList.defaultId ?? this.snapshot.defaultAgentId;
-      const agentIds = dedupeStrings(
-        agentList.agents.map((entry) => entry.id).filter((entry): entry is string => Boolean(entry))
-      );
-      const identityResponses = await Promise.all(
-        agentIds.map(async (agentId) => {
-          try {
-            const payload = await this.sendRequest(
-              'agent.identity.get',
-              { agentId },
-              { signal, retryable: false }
-            );
-            return { agentId, payload };
-          } catch (error) {
-            console.warn(`[OpenClaw] Failed to load identity for agent "${agentId}".`, error);
-            return { agentId, payload: null };
-          }
-        })
-      );
-      const sessionsPayload = await this.sendRequest(
-        'sessions.list',
-        {
-          activeMinutes: 120,
-          limit: 20,
-        },
-        {
-          signal,
-          retryable: false,
-        }
-      );
-
-      this.applyRpcSnapshot({
-        defaultAgentId,
-        agentIds,
-        identities: identityResponses,
-        sessionsPayload,
-      });
-      this.lastGatewayDataRefreshAt = Date.now();
-      this.syncOverviewCollections();
-    })()
-      .catch((error) => {
-        const normalized = normalizeError(error, 'Failed to refresh gateway data.');
-
-        if (normalized.code !== 'METHOD_NOT_FOUND') {
-          this.lastConnectionError = normalized;
-        }
-
-        throw normalized;
-      })
-      .finally(() => {
-        this.refreshGatewayDataPromise = null;
-      });
-
-    return this.refreshGatewayDataPromise;
-  }
-
-  private applyRpcSnapshot(input: {
-    defaultAgentId: string | null;
-    agentIds: string[];
-    identities: { agentId: string; payload: unknown }[];
-    sessionsPayload: unknown;
-  }) {
-    this.snapshot.defaultAgentId = input.defaultAgentId;
-    this.snapshot.agentsById.clear();
-    this.snapshot.sessionKeyByAgentId.clear();
-    this.snapshot.agentIdBySessionKey.clear();
-    this.snapshot.sessionsByKey.clear();
-    this.snapshot.runsById.clear();
-
-    const identitiesByAgentId = new Map(
-      input.identities.map((entry) => [entry.agentId, normalizeAgentIdentityPayload(entry.payload, entry.agentId)])
-    );
-    const sessions = normalizeSessionsListPayload(input.sessionsPayload);
-    const sessionAgentIds = dedupeStrings(sessions.map((session) => session.agentId));
-    const allAgentIds = dedupeStrings([
-      ...input.agentIds,
-      ...sessionAgentIds,
-      ...(input.defaultAgentId ? [input.defaultAgentId] : []),
-    ]);
-
-    for (const agentId of allAgentIds) {
-      const identity = identitiesByAgentId.get(agentId);
-      const fallback = this.snapshot.overview?.agents.find((agent) => agent.id === agentId);
-      const agent = normalizeAgentPayload(
-        {
-          id: agentId,
-          agentId,
-          name: identity?.name ?? fallback?.name ?? agentId,
-          avatar: identity?.avatar ?? fallback?.avatar ?? null,
-          role:
-            agentId === input.defaultAgentId
-              ? 'coordinator'
-              : fallback?.role,
-          isCoordinator:
-            agentId === input.defaultAgentId
-              ? true
-              : fallback?.isCoordinator,
-        },
-        fallback
-      );
-
-      if (agent) {
-        this.upsertAgent(agent);
-      }
-    }
-
-    for (const session of sessions) {
-      this.upsertSession(session);
-      this.upsertRun(
-        sessionToRun(session, {
-          agentName: this.snapshot.agentsById.get(session.agentId)?.name ?? session.agentName ?? session.agentId,
-        })
-      );
-    }
-  }
-
-  private collectAgentSnapshots() {
-    return sortAgents(
-      [...this.snapshot.agentsById.keys()]
-        .map((agentId) => this.buildAgentSnapshot(agentId))
-        .filter((agent): agent is GatewayAgentResponse => Boolean(agent))
-        .map(cloneAgent)
-    );
-  }
-
-  private buildAgentSnapshot(agentId: string) {
-    const base = this.snapshot.agentsById.get(agentId);
-
-    if (!base) {
-      return null;
-    }
-
-    const sessions = sortSessionSnapshots(
-      [...this.snapshot.sessionsByKey.values()]
-        .filter((session) => session.agentId === agentId)
-        .map(cloneSessionSnapshot)
-    );
-    const latestSession = sessions[0] ?? null;
-    const activeSession =
-      sessions.find((session) => session.status === 'running' || session.status === 'queued') ?? latestSession;
-    const channels = mergeAgentChannels(base.channels ?? [], sessions);
-    const currentRun = activeSession
-      ? sessionToRun(activeSession, {
-          agentName: base.name,
-        })
-      : base.currentRun ?? null;
-
-    return mergeAgent(base, {
-      ...base,
-      status: deriveAgentStatus(base, sessions),
-      model: latestSession?.model ?? base.model ?? 'unknown',
-      provider: latestSession?.provider ?? base.provider ?? 'unknown',
-      lastActivityAt: latestSession?.updatedAt ?? base.lastActivityAt ?? new Date().toISOString(),
-      channels,
-      currentRun,
-      conversationId: resolveDefaultSessionKeyForAgent(agentId, this.snapshot),
-      role:
-        agentId === this.snapshot.defaultAgentId
-          ? 'coordinator'
-          : base.role,
-      isCoordinator:
-        agentId === this.snapshot.defaultAgentId
-          ? true
-          : base.isCoordinator,
-    });
-  }
-
-  private upsertSession(session: GatewaySessionSnapshot | null) {
-    if (!session?.sessionKey || !session.agentId) {
-      return;
-    }
-
-    const existing = this.snapshot.sessionsByKey.get(session.sessionKey);
-    const merged = mergeSessionSnapshot(existing, session);
-    this.snapshot.sessionsByKey.set(merged.sessionKey, merged);
-    this.snapshot.agentIdBySessionKey.set(merged.sessionKey, merged.agentId);
-
-    const currentDefault = this.snapshot.sessionKeyByAgentId.get(merged.agentId);
-    const currentSession = currentDefault ? this.snapshot.sessionsByKey.get(currentDefault) : null;
-
-    if (!currentSession || compareSessionPreference(merged, currentSession) < 0) {
-      this.snapshot.sessionKeyByAgentId.set(merged.agentId, merged.sessionKey);
-    }
-  }
-
-  private setConnectionState(state: ConnectionState, error: OpenClawClientError | null = null) {
-    this.connectionState = state;
-    this.lastConnectionError = error;
-
-    if (this.snapshot.overview) {
-      this.snapshot.overview = {
-        ...this.snapshot.overview,
-        gateway: {
-          ...this.snapshot.overview.gateway,
-          online: state === 'connected',
-        },
-      };
-    }
-
-    this.connectionListeners.forEach((listener) => {
-      listener(state, error);
-    });
-  }
-
-  private resolveConnectPromise(overview: GatewayOverviewResponse) {
-    const resolve = this.connectPromiseResolve;
-    this.connectPromise = null;
-    this.connectPromiseResolve = null;
-    this.connectPromiseReject = null;
-
-    resolve?.(cloneOverview(overview));
-  }
-
-  private rejectConnectPromise(error: OpenClawClientError) {
-    const reject = this.connectPromiseReject;
-    this.connectPromise = null;
-    this.connectPromiseResolve = null;
-    this.connectPromiseReject = null;
-    reject?.(error);
-  }
-
-  private clearPendingRequest(id: string) {
-    const pending = this.pendingRequests.get(id);
-
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeoutId);
-    pending.abortCleanup?.();
-    this.pendingRequests.delete(id);
-  }
-
-  private rejectAllPendingRequests(error: OpenClawClientError) {
-    for (const [id, pending] of this.pendingRequests.entries()) {
-      this.clearPendingRequest(id);
-      pending.reject(error);
-    }
-  }
-
-  private armHandshakeTimeout(message: string) {
-    this.clearHandshakeTimeout();
-    this.handshakeTimeoutId = setTimeout(() => {
-      const error = new OpenClawClientError(message, {
-        code: 'REQUEST_TIMEOUT',
-      });
-      this.lastConnectionError = error;
-      this.rejectConnectPromise(error);
-      this.socket?.close();
-    }, this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  }
-
-  private clearHandshakeTimeout() {
-    if (this.handshakeTimeoutId) {
-      clearTimeout(this.handshakeTimeoutId);
-      this.handshakeTimeoutId = null;
-    }
-  }
-
-  private clearReconnectTimer() {
-    if (this.reconnectTimeoutId) {
-      clearTimeout(this.reconnectTimeoutId);
-      this.reconnectTimeoutId = null;
-    }
-  }
-
-  private getWebSocketImpl() {
-    return this.config.WebSocketImpl ?? globalThis.WebSocket;
   }
 }
 
@@ -1414,7 +339,8 @@ export function createOpenClawClient(config: OpenClawClientConfig) {
 }
 
 export function createStoredSessionClient(
-  config: Omit<OpenClawClientConfig, 'getAuthToken'> & Partial<Pick<OpenClawClientConfig, 'getAuthToken'>>
+  config: Omit<OpenClawClientConfig, 'getAuthToken'> &
+    Partial<Pick<OpenClawClientConfig, 'getAuthToken'>>
 ) {
   return new OpenClawClient({
     timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -1422,1569 +348,4 @@ export function createStoredSessionClient(
     ...config,
     getAuthToken: config.getAuthToken ?? (() => openClawAuth.getValidAccessToken()),
   });
-}
-
-function normalizeBaseUrl(baseUrl: string) {
-  return baseUrl.replace(/\/+$/, '');
-}
-
-function toWebSocketUrl(baseUrl: string) {
-  const url = new URL(normalizeBaseUrl(baseUrl));
-
-  if (url.protocol === 'http:') {
-    url.protocol = 'ws:';
-  } else if (url.protocol === 'https:') {
-    url.protocol = 'wss:';
-  }
-
-  return url.toString();
-}
-
-async function resolveAuthToken(config: OpenClawClientConfig) {
-  if (config.getAuthToken) {
-    return config.getAuthToken();
-  }
-
-  return config.authToken;
-}
-
-function parseSocketMessage(data: unknown): OpenClawPushEventMessage | OpenClawRpcResponseMessage | null {
-  if (typeof data !== 'string') {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(data) as unknown;
-    const record = asRecord(parsed);
-
-    if (!record || typeof record.type !== 'string') {
-      return null;
-    }
-
-    if (record.type === 'event' && typeof record.event === 'string') {
-      return {
-        type: 'event',
-        event: record.event,
-        payload: record.payload,
-        seq: typeof record.seq === 'number' ? record.seq : undefined,
-      };
-    }
-
-    if (record.type === 'res' && typeof record.id === 'string') {
-      return {
-        type: 'res',
-        id: record.id,
-        ok: record.ok === true,
-        payload: record.payload,
-        error: asRecord(record.error)
-          ? {
-              code: firstString(asRecord(record.error)?.code),
-              message: firstString(asRecord(record.error)?.message),
-              details: asRecord(record.error)?.details,
-            }
-          : undefined,
-      };
-    }
-  } catch (error) {
-    console.error('[OpenClaw] Ignoring malformed WebSocket payload.', error);
-  }
-
-  return null;
-}
-
-function rpcResponseToError(message: OpenClawRpcResponseMessage, fallbackMessage: string) {
-  return new OpenClawClientError(message.error?.message ?? fallbackMessage, {
-    code: message.error?.code ?? 'RPC_ERROR',
-    details: message.error?.details ?? message.payload,
-    requestId: message.id,
-  });
-}
-
-function normalizeError(error: unknown, fallbackMessage = 'OpenClaw request failed.') {
-  if (error instanceof OpenClawClientError) {
-    return error;
-  }
-
-  if (error instanceof Error) {
-    return new OpenClawClientError(error.message || fallbackMessage, {
-      code: error.name,
-    });
-  }
-
-  return new OpenClawClientError(fallbackMessage);
-}
-
-function normalizeHelloPayload(payload: unknown, baseUrl: string): GatewayOverviewResponse {
-  const root = asRecord(payload);
-  const snapshot = asRecord(root?.snapshot) ?? root ?? {};
-  const gatewayRecord = asRecord(snapshot.gateway) ?? asRecord(root?.gateway) ?? {};
-  const sessionRecord = asRecord(snapshot.session) ?? asRecord(root?.session) ?? {};
-  const statsRecord = asRecord(snapshot.stats) ?? asRecord(root?.stats);
-  const activityItems = getArray(snapshot.activity) ?? getArray(root?.activity) ?? [];
-  const agentItems = [...(getArray(snapshot.agents) ?? [])];
-  const runItems = [
-    ...(getArray(snapshot.recentRuns) ?? []),
-    ...(getArray(snapshot.runs) ?? getArray(root?.runs) ?? []),
-  ];
-  const incidentItems = [
-    ...(getArray(snapshot.incidents) ?? []),
-    ...(getArray(root?.incidents) ?? []),
-  ];
-  const agents = dedupeById(
-    agentItems
-      .map((item) => normalizeAgentPayload(item))
-      .filter((item): item is GatewayAgentResponse => Boolean(item))
-  );
-  const recentRuns = dedupeById(
-    runItems
-      .map((item) => normalizeRunPayload(item))
-      .filter((item): item is GatewayRunResponse => Boolean(item))
-  );
-  const incidents = dedupeById(
-    incidentItems
-      .map((item) => normalizeIncidentPayload(item))
-      .filter((item): item is GatewayIncidentResponse => Boolean(item))
-  );
-  const gatewayId =
-    firstString(gatewayRecord.id, gatewayRecord.gatewayId, root?.gatewayId) ?? baseUrl;
-  const gatewayName =
-    firstString(gatewayRecord.name, root?.gatewayName, root?.name) ?? safeHostname(baseUrl);
-  const capabilities = normalizeCapabilities(
-    asRecord(gatewayRecord.capabilities) ?? asRecord(sessionRecord.capabilities)
-  );
-  const helloSessionKey = extractSessionKey(root) ?? extractSessionKey(snapshot);
-  const activity = activityItems.reduce<GatewayActivityResponse[]>((items, item) => {
-    const next = normalizeActivityPayload(item);
-
-    if (next) {
-      items.push(next);
-    }
-
-    return items;
-  }, []);
-
-  return {
-    gateway: {
-      id: gatewayId,
-      name: gatewayName,
-      online: true,
-      version: firstString(gatewayRecord.version, root?.gatewayVersion),
-      uptime: firstString(gatewayRecord.uptime),
-      latencyMs: firstNumber(gatewayRecord.latencyMs),
-      lastSyncAt: firstString(gatewayRecord.lastSyncAt, root?.connectedAt) ?? new Date().toISOString(),
-      capabilities,
-    },
-    session: {
-      id: firstString(sessionRecord.id, root?.sessionId, helloSessionKey) ?? gatewayId,
-      operatorId:
-        firstString(
-          sessionRecord.operatorId,
-          root?.operatorId,
-          asRecord(root?.operator)?.id
-        ) ?? null,
-      operatorName:
-        firstString(
-          sessionRecord.operatorName,
-          root?.operatorName,
-          asRecord(root?.operator)?.name
-        ) ?? null,
-      metadata: {
-        ...(asRecord(sessionRecord.metadata) ?? {}),
-        protocol:
-          firstNumber(root?.protocol, snapshot.protocol) ?? SUPPORTED_PROTOCOL_VERSION,
-        helloSessionKey,
-      },
-    },
-    stats: statsRecord
-      ? {
-          totalAgents: firstNumber(statsRecord.totalAgents),
-          onlineAgents: firstNumber(statsRecord.onlineAgents),
-          activeChannels: firstNumber(statsRecord.activeChannels),
-          pendingJobs: firstNumber(statsRecord.pendingJobs),
-          openIncidents: firstNumber(statsRecord.openIncidents),
-          activeRuns: firstNumber(statsRecord.activeRuns),
-        }
-      : undefined,
-    coordinator:
-      normalizeAgentPayload(snapshot.coordinator ?? root?.coordinator) ??
-      agents.find((agent) => agent.isCoordinator || agent.role === 'coordinator') ??
-      null,
-    agents,
-    recentRuns,
-    incidents,
-    activity,
-  };
-}
-
-function normalizeCapabilities(value: Record<string, unknown> | null | undefined) {
-  if (!value) {
-    return undefined;
-  }
-
-  const normalized: Partial<GatewayCapabilities> = {};
-  const booleanKeys: (keyof GatewayCapabilities)[] = [
-    'canReadOverview',
-    'canReadAgents',
-    'canReadRuns',
-    'canReadIncidents',
-    'canReadConversation',
-    'canWriteConversation',
-    'canRetryRun',
-    'canRestartAgent',
-    'canPingAgent',
-    'supportsStreaming',
-    'supportsRealtimeEvents',
-    'supportsPolling',
-  ];
-
-  booleanKeys.forEach((key) => {
-    const rawValue = value[key];
-    if (typeof rawValue === 'boolean') {
-      normalized[key] = rawValue;
-    }
-  });
-
-  return normalized;
-}
-
-function normalizeActivityPayload(value: unknown) {
-  const record = asRecord(value);
-  const id = firstString(record?.id);
-  const agentId = firstString(record?.agentId);
-  const agentName = firstString(record?.agentName);
-  const type = firstString(record?.type);
-  const title = firstString(record?.title);
-  const detail = firstString(record?.detail);
-  const timestamp = firstString(record?.timestamp, record?.createdAt);
-
-  if (!id || !agentId || !agentName || !type || !title || !detail || !timestamp) {
-    return null;
-  }
-
-  return {
-    id,
-    agentId,
-    agentName,
-    type: type as GatewayActivityResponse['type'],
-    title,
-    detail,
-    timestamp,
-    channel: firstString(record?.channel) as GatewayActivityResponse['channel'],
-    runId: firstString(record?.runId) ?? null,
-    incidentId: firstString(record?.incidentId) ?? null,
-    severity: firstString(record?.severity) as GatewayActivityResponse['severity'],
-  } satisfies GatewayActivityResponse;
-}
-
-function normalizeAgentPayload(
-  value: unknown,
-  fallback?: GatewayAgentResponse
-): GatewayAgentResponse | null {
-  const record = asRecord(value);
-  const id = firstString(record?.id, record?.agentId) ?? fallback?.id;
-
-  if (!id) {
-    return null;
-  }
-
-  const conversationId = extractSessionKey(record) ?? fallback?.conversationId ?? null;
-  const status = normalizeAgentStatus(
-    firstString(record?.status, record?.state, record?.presence) ?? fallback?.status
-  );
-
-  return {
-    id,
-    name: firstString(record?.name, record?.agentName, record?.label) ?? fallback?.name ?? id,
-    avatar: firstString(record?.avatar, record?.emoji) ?? fallback?.avatar ?? null,
-    status,
-    model: firstString(record?.model, record?.modelName) ?? fallback?.model ?? 'unknown',
-    provider: firstString(record?.provider, record?.vendor) ?? fallback?.provider ?? 'unknown',
-    description:
-      firstString(record?.description, record?.summary) ?? fallback?.description ?? 'Operational agent',
-    agentDir: firstString(record?.agentDir, record?.path) ?? fallback?.agentDir ?? '',
-    lastActivityAt:
-      firstString(record?.lastActivityAt, record?.updatedAt, record?.lastSeenAt, record?.timestamp) ??
-      fallback?.lastActivityAt ??
-      new Date().toISOString(),
-    role: normalizeAgentRole(record, fallback),
-    specialistType:
-      firstString(record?.specialistType, record?.kind) ?? fallback?.specialistType ?? null,
-    isCoordinator:
-      firstBoolean(record?.isCoordinator) ??
-      (firstString(record?.role) === 'coordinator'
-        ? true
-        : (fallback?.isCoordinator ?? false)),
-    channels:
-      normalizeChannels(record?.channels) ?? fallback?.channels?.map(cloneChannel) ?? [],
-    currentRun: normalizeRunPayload(record?.currentRun ?? record?.run ?? record?.latestRun, {
-      agentId: id,
-      conversationId,
-    }),
-    allowedActions:
-      normalizeStringArray(record?.allowedActions) ??
-      fallback?.allowedActions?.slice() ??
-      [],
-    conversationId,
-    metadata: {
-      ...(fallback?.metadata ?? {}),
-      ...(record ?? {}),
-    },
-  };
-}
-
-function normalizeAgentRole(record: Record<string, unknown> | null | undefined, fallback?: GatewayAgentResponse) {
-  const role = firstString(record?.role);
-
-  if (role === 'coordinator' || role === 'specialist') {
-    return role;
-  }
-
-  if (firstBoolean(record?.isCoordinator)) {
-    return 'coordinator';
-  }
-
-  return fallback?.role ?? 'specialist';
-}
-
-function normalizeChannels(value: unknown) {
-  const items = getArray(value);
-
-  if (!items) {
-    return null;
-  }
-
-  return items
-    .map((entry) => {
-      const record = asRecord(entry);
-      const id = firstString(record?.id, record?.channelId);
-      const type = firstString(record?.type);
-
-      if (!id || !type) {
-        return null;
-      }
-
-      return {
-        id,
-        type: type as ChannelType,
-        identifier: firstString(record?.identifier, record?.handle) ?? '',
-        label: firstString(record?.label, record?.name) ?? type,
-        connected: firstBoolean(record?.connected) ?? false,
-      };
-    })
-    .filter(
-      (
-        channel
-      ): channel is {
-        id: string;
-        type: ChannelType;
-        identifier: string;
-        label: string;
-        connected: boolean;
-      } => Boolean(channel)
-    );
-}
-
-function normalizeRunPayload(
-  value: unknown,
-  fallback?: Partial<GatewayRunResponse>
-): GatewayRunResponse | null {
-  const record = asRecord(value);
-  const id = firstString(record?.id, record?.runId) ?? fallback?.id;
-
-  if (!id) {
-    return null;
-  }
-
-  const createdAt =
-    firstString(record?.createdAt, record?.timestamp, record?.startedAt, record?.updatedAt) ??
-    fallback?.createdAt ??
-    new Date().toISOString();
-  const status = normalizeRunStatus(
-    firstString(record?.status, record?.state) ?? fallback?.status ?? 'queued'
-  );
-
-  return {
-    id,
-    agentId: firstString(record?.agentId) ?? fallback?.agentId ?? '',
-    agentName: firstString(record?.agentName) ?? fallback?.agentName ?? '',
-    conversationId:
-      firstString(record?.conversationId, record?.sessionKey) ??
-      fallback?.conversationId ??
-      null,
-    status,
-    title: firstString(record?.title, record?.name) ?? fallback?.title ?? 'Untitled run',
-    summary:
-      firstString(record?.summary, record?.description, record?.message) ??
-      fallback?.summary ??
-      (status === 'failed' ? 'Run failed.' : status === 'running' ? 'Run in progress.' : 'Recent run.'),
-    createdAt,
-    startedAt: firstString(record?.startedAt) ?? fallback?.startedAt ?? null,
-    updatedAt: firstString(record?.updatedAt, record?.completedAt) ?? fallback?.updatedAt ?? createdAt,
-    completedAt: firstString(record?.completedAt) ?? fallback?.completedAt ?? null,
-    durationMs: firstNumber(record?.durationMs) ?? fallback?.durationMs ?? null,
-    errorMessage: firstString(record?.errorMessage, record?.error) ?? fallback?.errorMessage ?? null,
-    incidentId: firstString(record?.incidentId) ?? fallback?.incidentId ?? null,
-    auditId: firstString(record?.auditId) ?? fallback?.auditId ?? null,
-    delegatedAgentIds:
-      normalizeStringArray(record?.delegatedAgentIds) ??
-      fallback?.delegatedAgentIds?.slice() ??
-      [],
-    delegatedAgentNames:
-      normalizeStringArray(record?.delegatedAgentNames) ??
-      fallback?.delegatedAgentNames?.slice() ??
-      [],
-    canRetry: firstBoolean(record?.canRetry) ?? fallback?.canRetry ?? false,
-    metadata: {
-      ...(fallback?.metadata ?? {}),
-      ...(record ?? {}),
-    },
-  };
-}
-
-function normalizeIncidentPayload(
-  value: unknown,
-  fallback?: GatewayIncidentResponse
-): GatewayIncidentResponse | null {
-  const record = asRecord(value);
-  const id = firstString(record?.id, record?.incidentId) ?? fallback?.id;
-
-  if (!id) {
-    return null;
-  }
-
-  const createdAt = firstString(record?.createdAt, record?.timestamp) ?? fallback?.createdAt ?? new Date().toISOString();
-
-  return {
-    id,
-    title: firstString(record?.title, record?.name) ?? fallback?.title ?? 'Incident',
-    summary: firstString(record?.summary, record?.message, record?.description) ?? fallback?.summary ?? 'Operator attention required.',
-    severity: normalizeIncidentSeverity(firstString(record?.severity) ?? fallback?.severity),
-    status: normalizeIncidentStatus(firstString(record?.status, record?.state) ?? fallback?.status),
-    createdAt,
-    updatedAt: firstString(record?.updatedAt, record?.resolvedAt) ?? fallback?.updatedAt ?? createdAt,
-    resolvedAt: firstString(record?.resolvedAt) ?? fallback?.resolvedAt ?? null,
-    agentId: firstString(record?.agentId) ?? fallback?.agentId ?? null,
-    agentName: firstString(record?.agentName) ?? fallback?.agentName ?? '',
-    runId: firstString(record?.runId) ?? fallback?.runId ?? null,
-    conversationId:
-      firstString(record?.conversationId, record?.sessionKey) ??
-      fallback?.conversationId ??
-      null,
-    auditId: firstString(record?.auditId) ?? fallback?.auditId ?? null,
-    metadata: {
-      ...(fallback?.metadata ?? {}),
-      ...(record ?? {}),
-    },
-  };
-}
-
-function normalizeConversationHistory(
-  payload: unknown,
-  sessionKey: string,
-  fallbackAgentId: string
-): GatewayConversationResponse {
-  const record = asRecord(payload) ?? {};
-  const messages = (getArray(record.messages) ?? [])
-    .map((entry) => normalizeConversationMessage(entry, fallbackAgentId, sessionKey))
-    .filter((message): message is GatewayConversationMessageResponse => Boolean(message));
-
-  return {
-    id: sessionKey,
-    agentId:
-      firstString(record.agentId, asRecord(record.agent)?.id) ??
-      fallbackAgentId,
-    agentName:
-      firstString(record.agentName, asRecord(record.agent)?.name) ?? undefined,
-    messages: sortConversationMessages(messages),
-    events: [],
-    latestRun: normalizeRunPayload(record.latestRun, {
-      agentId: fallbackAgentId,
-      conversationId: sessionKey,
-    }),
-    nextCursor:
-      firstString(record.nextCursor, record.cursor) ??
-      (messages.length > 0 ? messages[messages.length - 1]?.createdAt : null) ??
-      null,
-  };
-}
-
-function normalizeConversationMessage(
-  value: unknown,
-  fallbackAgentId: string,
-  sessionKey: string,
-  fallbackRole: GatewayConversationMessageResponse['role'] = 'assistant'
-): GatewayConversationMessageResponse | null {
-  const record = asRecord(value);
-  const id = firstString(record?.id, record?.messageId) ?? `message:${createId()}`;
-  const content =
-    firstString(record?.content, record?.text, record?.delta) ??
-    (typeof value === 'string' ? value : '');
-
-  return {
-    id,
-    agentId: firstString(record?.agentId) ?? fallbackAgentId,
-    role: normalizeMessageRole(firstString(record?.role) ?? fallbackRole),
-    content,
-    createdAt: firstString(record?.createdAt, record?.timestamp) ?? new Date().toISOString(),
-    conversationId:
-      firstString(record?.conversationId, record?.sessionKey) ?? sessionKey,
-    runId: firstString(record?.runId) ?? null,
-    status: normalizeMessageStatus(firstString(record?.status)),
-    metadata: {
-      ...(record ?? {}),
-    },
-  };
-}
-
-function normalizeAgentIdentityPayload(payload: unknown, fallbackAgentId: string) {
-  const record = asRecord(payload);
-
-  return {
-    agentId:
-      firstString(record?.agentId, record?.id) ??
-      fallbackAgentId,
-    name:
-      firstString(record?.name, record?.agentName, record?.label) ??
-      fallbackAgentId,
-    avatar: firstString(record?.avatar, record?.emoji) ?? null,
-  };
-}
-
-function normalizeAgentsListPayload(payload: unknown) {
-  const record = asRecord(payload);
-  const items = getArray(record?.agents) ?? (Array.isArray(payload) ? payload : []);
-
-  return {
-    defaultId: firstString(record?.defaultId, record?.defaultAgentId) ?? null,
-    agents: items
-      .map((entry) => {
-        const agentRecord = asRecord(entry);
-
-        return {
-          id: firstString(agentRecord?.id, agentRecord?.agentId),
-        };
-      })
-      .filter((entry): entry is { id: string } => Boolean(entry.id)),
-  };
-}
-
-function normalizeSessionsListPayload(payload: unknown) {
-  const record = asRecord(payload);
-  const items = getArray(record?.sessions) ?? getArray(record?.items) ?? (Array.isArray(payload) ? payload : []);
-
-  return items
-    .map((entry) => normalizeSessionPayload(entry))
-    .filter((session): session is GatewaySessionSnapshot => Boolean(session));
-}
-
-function normalizeSessionPayload(
-  value: unknown,
-  fallback: Partial<GatewaySessionSnapshot> = {}
-): GatewaySessionSnapshot | null {
-  const record = asRecord(value);
-  const sessionKey =
-    firstString(
-      record?.sessionKey,
-      record?.id,
-      record?.conversationId,
-      record?.conversationKey,
-      record?.threadId
-    ) ?? fallback.sessionKey;
-  const agentRecord = asRecord(record?.agent);
-  const agentId =
-    firstString(record?.agentId, agentRecord?.id) ??
-    parseAgentIdFromSessionKey(sessionKey) ??
-    fallback.agentId;
-
-  if (!sessionKey || !agentId) {
-    return null;
-  }
-
-  const channelRecord = asRecord(record?.channel);
-  const createdAt =
-    firstString(record?.createdAt, record?.startedAt, record?.updatedAt, record?.lastMessageAt) ??
-    fallback.createdAt ??
-    new Date().toISOString();
-  const updatedAt =
-    firstString(record?.updatedAt, record?.lastMessageAt, record?.lastActivityAt, record?.createdAt) ??
-    fallback.updatedAt ??
-    createdAt;
-
-  return {
-    sessionKey,
-    agentId,
-    agentName:
-      firstString(record?.agentName, agentRecord?.name) ??
-      fallback.agentName,
-    status:
-      normalizeSessionStatus(
-        firstString(
-          record?.status,
-          record?.state,
-          record?.runStatus,
-          asRecord(record?.run)?.status,
-          asRecord(record?.latestRun)?.status
-        ),
-        record,
-        fallback.status
-      ),
-    createdAt,
-    updatedAt,
-    model:
-      firstString(
-        record?.model,
-        record?.modelName,
-        asRecord(record?.usage)?.model,
-        asRecord(record?.latestRun)?.model
-      ) ?? fallback.model,
-    provider:
-      firstString(
-        record?.provider,
-        record?.vendor,
-        record?.modelProvider,
-        asRecord(record?.usage)?.provider
-      ) ?? fallback.provider,
-    channelType:
-      firstString(channelRecord?.type, record?.channelType) ??
-      fallback.channelType ??
-      inferChannelTypeFromSessionKey(sessionKey),
-    channelLabel:
-      firstString(channelRecord?.label, channelRecord?.name, record?.channelLabel) ??
-      fallback.channelLabel ??
-      inferChannelLabelFromSessionKey(sessionKey),
-    channelIdentifier:
-      firstString(channelRecord?.identifier, channelRecord?.id, record?.channelId) ??
-      fallback.channelIdentifier ??
-      null,
-    connected:
-      firstBoolean(channelRecord?.connected, record?.connected, record?.active) ??
-      fallback.connected,
-    messageCount:
-      firstNumber(record?.messageCount, record?.messagesCount, asRecord(record?.stats)?.messageCount) ??
-      fallback.messageCount ??
-      null,
-    tokenCount:
-      firstNumber(
-        record?.tokenCount,
-        record?.tokens,
-        asRecord(record?.usage)?.totalTokens,
-        asRecord(record?.stats)?.tokenCount
-      ) ??
-      fallback.tokenCount ??
-      null,
-    promptTokens:
-      firstNumber(record?.promptTokens, asRecord(record?.usage)?.promptTokens) ??
-      fallback.promptTokens ??
-      null,
-    completionTokens:
-      firstNumber(record?.completionTokens, asRecord(record?.usage)?.completionTokens) ??
-      fallback.completionTokens ??
-      null,
-    metadata: {
-      ...(fallback.metadata ?? {}),
-      ...(record ?? {}),
-    },
-  };
-}
-
-function normalizeNodePayload(value: Record<string, unknown> | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const agentRecord = asRecord(value.agent);
-  const id =
-    firstString(
-      value.id,
-      value.nodeId,
-      value.instanceId,
-      value.host,
-      value.hostname,
-      value.ip,
-      agentRecord?.id
-    ) ?? null;
-
-  if (!id) {
-    return null;
-  }
-
-  return {
-    id,
-    label:
-      firstString(value.label, value.name, value.host, value.hostname, value.ip) ??
-      id,
-    status:
-      firstString(value.status, value.state, value.presence) ??
-      'unknown',
-    lastSeenAt:
-      firstString(value.lastSeenAt, value.updatedAt, value.timestamp) ?? null,
-    metadata: {
-      ...(value ?? {}),
-    },
-  } satisfies GatewayNodeSnapshot;
-}
-
-function createEmptyConversationResponse(agentId?: string, conversationId?: string) {
-  return {
-    id: conversationId ?? `pending:${agentId ?? 'conversation'}`,
-    agentId: agentId ?? '',
-    messages: [],
-    events: [],
-    latestRun: null,
-    nextCursor: null,
-  } satisfies GatewayConversationResponse;
-}
-
-function resolveOutgoingSessionKey(
-  input: Pick<SendMessageInput, 'agentId' | 'conversationId'>,
-  snapshot: SnapshotState
-) {
-  if (input.conversationId && !input.conversationId.startsWith('pending:')) {
-    return input.conversationId;
-  }
-
-  if (input.agentId) {
-    return resolveDefaultSessionKeyForAgent(input.agentId, snapshot);
-  }
-
-  return null;
-}
-
-function unsupportedActionError(action: GatewayActionResponse['action']) {
-  return new OpenClawClientError(`${action} is not exposed by the WebSocket gateway protocol.`, {
-    code: 'METHOD_NOT_SUPPORTED',
-  });
-}
-
-function resolveSocketCloseCode(code: number) {
-  switch (code) {
-    case 1000:
-      return 'WS_CLOSED';
-    case 1006:
-      return 'WS_ABNORMAL_CLOSE';
-    case 1011:
-      return 'WS_SERVER_ERROR';
-    default:
-      return 'WS_CLOSED';
-  }
-}
-
-function mergeAgent(current: GatewayAgentResponse | undefined, next: GatewayAgentResponse) {
-  if (!current) {
-    return next;
-  }
-
-  return {
-    ...current,
-    ...next,
-    channels: next.channels?.length
-      ? next.channels.map(cloneChannel)
-      : (current.channels ?? []).map(cloneChannel),
-    currentRun: next.currentRun ?? current.currentRun ?? null,
-    allowedActions: next.allowedActions?.length ? next.allowedActions.slice() : current.allowedActions?.slice(),
-    metadata: {
-      ...(current.metadata ?? {}),
-      ...(next.metadata ?? {}),
-    },
-  };
-}
-
-function mergeRun(current: GatewayRunResponse | undefined, next: GatewayRunResponse) {
-  if (!current) {
-    return next;
-  }
-
-  return {
-    ...current,
-    ...next,
-    delegatedAgentIds: next.delegatedAgentIds?.length ? next.delegatedAgentIds.slice() : current.delegatedAgentIds?.slice(),
-    delegatedAgentNames: next.delegatedAgentNames?.length ? next.delegatedAgentNames.slice() : current.delegatedAgentNames?.slice(),
-    metadata: {
-      ...(current.metadata ?? {}),
-      ...(next.metadata ?? {}),
-    },
-  };
-}
-
-function mergeIncident(current: GatewayIncidentResponse | undefined, next: GatewayIncidentResponse) {
-  if (!current) {
-    return next;
-  }
-
-  return {
-    ...current,
-    ...next,
-    metadata: {
-      ...(current.metadata ?? {}),
-      ...(next.metadata ?? {}),
-    },
-  };
-}
-
-function mergeConversation(
-  current: GatewayConversationResponse | undefined,
-  next: GatewayConversationResponse
-) {
-  if (!current) {
-    return {
-      ...next,
-      messages: sortConversationMessages(next.messages.map(cloneMessage)),
-      events: next.events?.slice() ?? [],
-    };
-  }
-
-  const messages = new Map<string, GatewayConversationMessageResponse>();
-  [...current.messages, ...next.messages].forEach((message) => {
-    const existing = messages.get(message.id);
-    messages.set(message.id, mergeConversationMessage(existing, message));
-  });
-
-  return {
-    ...current,
-    ...next,
-    messages: sortConversationMessages([...messages.values()].map(cloneMessage)),
-    events: next.events?.length ? next.events.slice() : current.events?.slice() ?? [],
-    latestRun: next.latestRun ?? current.latestRun ?? null,
-    nextCursor: next.nextCursor ?? current.nextCursor ?? null,
-  };
-}
-
-function mergeConversationMessage(
-  current: GatewayConversationMessageResponse | undefined,
-  next: GatewayConversationMessageResponse
-) {
-  if (!current) {
-    return next;
-  }
-
-  const nextStatus = normalizeMessageStatus(next.status) ?? current.status;
-
-  return {
-    ...current,
-    ...next,
-    content:
-      next.content.length >= current.content.length ? next.content : current.content,
-    status: nextStatus,
-    metadata: {
-      ...(current.metadata ?? {}),
-      ...(next.metadata ?? {}),
-    },
-  };
-}
-
-function mergeSessionSnapshot(
-  current: GatewaySessionSnapshot | undefined,
-  next: GatewaySessionSnapshot
-) {
-  if (!current) {
-    return next;
-  }
-
-  return {
-    ...current,
-    ...next,
-    metadata: {
-      ...(current.metadata ?? {}),
-      ...(next.metadata ?? {}),
-    },
-  };
-}
-
-function compareSessionPreference(left: GatewaySessionSnapshot, right: GatewaySessionSnapshot) {
-  const leftRank = sessionPreferenceRank(left);
-  const rightRank = sessionPreferenceRank(right);
-
-  if (leftRank !== rightRank) {
-    return leftRank - rightRank;
-  }
-
-  return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-}
-
-function sessionPreferenceRank(session: GatewaySessionSnapshot) {
-  if (session.channelType === 'main' || session.channelType === 'direct') {
-    return 0;
-  }
-
-  if (session.status === 'running' || session.status === 'queued') {
-    return 1;
-  }
-
-  return 2;
-}
-
-function sessionToRun(
-  session: GatewaySessionSnapshot,
-  fallback: Partial<GatewayRunResponse> = {}
-): GatewayRunResponse {
-  const title =
-    firstString(
-      session.metadata.title,
-      session.metadata.name,
-      session.metadata.subject
-    ) ??
-    (session.channelLabel
-      ? `${session.channelLabel} session`
-      : session.channelType === 'main' || session.channelType === 'direct'
-        ? 'Direct session'
-        : 'Session activity');
-
-  return normalizeRunPayload(
-    {
-      id:
-        firstString(
-          session.metadata.runId,
-          session.metadata.id,
-          session.sessionKey
-        ) ?? session.sessionKey,
-      runId: firstString(session.metadata.runId),
-      agentId: session.agentId,
-      agentName: session.agentName ?? fallback.agentName,
-      sessionKey: session.sessionKey,
-      status: session.status,
-      title,
-      summary:
-        firstString(
-          session.metadata.summary,
-          session.metadata.description,
-          session.metadata.lastMessage,
-          session.metadata.preview
-        ) ??
-        (session.status === 'failed'
-          ? 'Recent session failed.'
-          : session.status === 'running' || session.status === 'queued'
-            ? 'Session is active.'
-            : 'Recent session activity.'),
-      createdAt: session.createdAt,
-      startedAt: session.createdAt,
-      updatedAt: session.updatedAt,
-      durationMs: firstNumber(session.metadata.durationMs) ?? null,
-      errorMessage:
-        firstString(session.metadata.errorMessage, session.metadata.error) ?? null,
-      tokens: session.tokenCount ?? undefined,
-      metadata: {
-        ...session.metadata,
-        sessionKey: session.sessionKey,
-        channelType: session.channelType,
-        channelLabel: session.channelLabel,
-        channelIdentifier: session.channelIdentifier,
-        tokenCount: session.tokenCount,
-        promptTokens: session.promptTokens,
-        completionTokens: session.completionTokens,
-        messageCount: session.messageCount,
-      },
-    },
-    fallback
-  ) ?? {
-    id: session.sessionKey,
-    agentId: session.agentId,
-    agentName: session.agentName ?? fallback.agentName ?? '',
-    conversationId: session.sessionKey,
-    status: session.status,
-    title,
-    summary: 'Recent session activity.',
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt,
-    metadata: {
-      ...session.metadata,
-      sessionKey: session.sessionKey,
-    },
-  };
-}
-
-function resolveDefaultSessionKeyForAgent(agentId: string, snapshot: SnapshotState) {
-  return snapshot.sessionKeyByAgentId.get(agentId) ?? constructDefaultDirectSessionKey(agentId);
-}
-
-function constructDefaultDirectSessionKey(agentId: string) {
-  return `agent:${agentId}:main`;
-}
-
-function parseAgentIdFromSessionKey(sessionKey: string | null | undefined) {
-  if (!sessionKey) {
-    return null;
-  }
-
-  const match = /^agent:([^:]+):/u.exec(sessionKey);
-  return match?.[1] ?? null;
-}
-
-function inferChannelTypeFromSessionKey(sessionKey: string) {
-  const parts = sessionKey.split(':');
-
-  if (parts.length < 3) {
-    return null;
-  }
-
-  return parts[2] ?? null;
-}
-
-function inferChannelLabelFromSessionKey(sessionKey: string) {
-  const channelType = inferChannelTypeFromSessionKey(sessionKey);
-
-  if (!channelType) {
-    return null;
-  }
-
-  if (channelType === 'main') {
-    return 'Direct';
-  }
-
-  return channelType;
-}
-
-function cloneSessionSnapshot(session: GatewaySessionSnapshot): GatewaySessionSnapshot {
-  return {
-    ...session,
-    metadata: { ...session.metadata },
-  };
-}
-
-function createEmptySnapshotState(): SnapshotState {
-  return {
-    overview: null,
-    agentsById: new Map(),
-    defaultAgentId: null,
-    sessionKeyByAgentId: new Map(),
-    agentIdBySessionKey: new Map(),
-    sessionsByKey: new Map(),
-    conversationsBySessionKey: new Map(),
-    runsById: new Map(),
-    incidentsById: new Map(),
-    nodesById: new Map(),
-  };
-}
-
-function ensureConversation(
-  current: GatewayConversationResponse | undefined,
-  base: Pick<GatewayConversationResponse, 'id' | 'agentId' | 'agentName'>
-) {
-  return (
-    current ?? {
-      id: base.id,
-      agentId: base.agentId,
-      agentName: base.agentName,
-      messages: [],
-      events: [],
-      latestRun: null,
-      nextCursor: null,
-    }
-  );
-}
-
-function createAssistantMessage(input: {
-  id: string;
-  agentId: string;
-  conversationId: string;
-  runId?: string | null;
-  content: string;
-  status: GatewayConversationMessageResponse['status'];
-}) {
-  return {
-    id: input.id,
-    agentId: input.agentId,
-    role: 'assistant' as const,
-    content: input.content,
-    createdAt: new Date().toISOString(),
-    conversationId: input.conversationId,
-    runId: input.runId ?? null,
-    status: input.status,
-    metadata: {},
-  };
-}
-
-function mergeAgentChannels(
-  channels: GatewayAgentResponse['channels'] | undefined,
-  sessions: GatewaySessionSnapshot[]
-) {
-  const byId = new Map<string, NonNullable<GatewayAgentResponse['channels']>[number]>();
-
-  (channels ?? []).forEach((channel) => {
-    byId.set(channel.id, cloneChannel(channel));
-  });
-
-  sessions.forEach((session) => {
-    const channelId =
-      session.channelIdentifier ??
-      session.channelLabel ??
-      session.channelType ??
-      session.sessionKey;
-    const channelType = normalizeChannelType(session.channelType);
-
-    if (!channelId || !channelType) {
-      return;
-    }
-
-    byId.set(channelId, {
-      id: channelId,
-      type: channelType,
-      identifier: session.channelIdentifier ?? channelId,
-      label: session.channelLabel ?? channelType,
-      connected: session.connected ?? (session.status === 'running' || session.status === 'queued'),
-    });
-  });
-
-  return [...byId.values()];
-}
-
-function deriveAgentStatus(
-  agent: GatewayAgentResponse,
-  sessions: GatewaySessionSnapshot[]
-): AgentStatus {
-  if (sessions.some((session) => session.status === 'running' || session.status === 'queued')) {
-    return 'busy';
-  }
-
-  const latestSession = sessions[0];
-  if (latestSession?.status === 'failed' || latestSession?.status === 'degraded') {
-    return 'degraded';
-  }
-
-  if (sessions.length > 0) {
-    return 'online';
-  }
-
-  return agent.status ?? 'offline';
-}
-
-function sortAgents(items: GatewayAgentResponse[]) {
-  return items.sort((left, right) => {
-    const leftRank = left.isCoordinator || left.role === 'coordinator' ? 0 : 1;
-    const rightRank = right.isCoordinator || right.role === 'coordinator' ? 0 : 1;
-
-    if (leftRank !== rightRank) {
-      return leftRank - rightRank;
-    }
-
-    return left.name.localeCompare(right.name);
-  });
-}
-
-function sortSessionSnapshots(items: GatewaySessionSnapshot[]) {
-  return items.sort((left, right) => {
-    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-  });
-}
-
-function sortRuns(items: GatewayRunResponse[]) {
-  return items.sort((left, right) => {
-    const leftTime = Date.parse(left.updatedAt ?? left.createdAt);
-    const rightTime = Date.parse(right.updatedAt ?? right.createdAt);
-    return rightTime - leftTime;
-  });
-}
-
-function sortIncidents(items: GatewayIncidentResponse[]) {
-  return items.sort((left, right) => {
-    const leftTime = Date.parse(left.updatedAt ?? left.createdAt);
-    const rightTime = Date.parse(right.updatedAt ?? right.createdAt);
-    return rightTime - leftTime;
-  });
-}
-
-function sortConversationMessages(items: GatewayConversationMessageResponse[]) {
-  return items.sort((left, right) => {
-    const leftTime = Date.parse(left.createdAt);
-    const rightTime = Date.parse(right.createdAt);
-
-    if (leftTime !== rightTime) {
-      return leftTime - rightTime;
-    }
-
-    return left.id.localeCompare(right.id);
-  });
-}
-
-function filterAgents(items: GatewayAgentResponse[], query?: AgentQuery) {
-  return items.filter((agent) => {
-    const matchesStatus = !query?.status
-      ? true
-      : Array.isArray(query.status)
-        ? query.status.includes(agent.status)
-        : agent.status === query.status;
-    const matchesSearch = !query?.search
-      ? true
-      : [agent.name, agent.model ?? '', agent.provider ?? '', agent.description ?? '']
-          .join(' ')
-          .toLowerCase()
-          .includes(query.search.toLowerCase());
-    const includeCoordinator = query?.includeCoordinator ?? true;
-    const matchesCoordinator = includeCoordinator ? true : !agent.isCoordinator;
-
-    return matchesStatus && matchesSearch && matchesCoordinator;
-  });
-}
-
-function filterRuns(items: GatewayRunResponse[], query?: RunsQuery) {
-  const filtered = items.filter((run) => {
-    const matchesStatus = !query?.status
-      ? true
-      : Array.isArray(query.status)
-        ? query.status.includes(run.status)
-        : run.status === query.status;
-    const matchesAgent = !query?.agentId || run.agentId === query.agentId;
-    const matchesConversation = !query?.conversationId || run.conversationId === query.conversationId;
-
-    return matchesStatus && matchesAgent && matchesConversation;
-  });
-
-  return typeof query?.limit === 'number' ? filtered.slice(0, query.limit) : filtered;
-}
-
-function filterIncidents(items: GatewayIncidentResponse[], query?: IncidentsQuery) {
-  const filtered = items.filter((incident) => {
-    const matchesStatus = !query?.status
-      ? true
-      : Array.isArray(query.status)
-        ? query.status.includes(incident.status)
-        : incident.status === query.status;
-    const matchesSeverity = !query?.severity
-      ? true
-      : Array.isArray(query.severity)
-        ? query.severity.includes(incident.severity)
-        : incident.severity === query.severity;
-    const matchesAgent = !query?.agentId || incident.agentId === query.agentId;
-    const matchesRun = !query?.runId || incident.runId === query.runId;
-
-    return matchesStatus && matchesSeverity && matchesAgent && matchesRun;
-  });
-
-  return typeof query?.limit === 'number' ? filtered.slice(0, query.limit) : filtered;
-}
-
-function collectNormalizedRuns(value: unknown) {
-  const items = getArray(value);
-
-  if (items) {
-    return items.map((entry) => normalizeRunPayload(entry)).filter((run): run is GatewayRunResponse => Boolean(run));
-  }
-
-  const directRun = normalizeRunPayload(value);
-  return directRun ? [directRun] : [];
-}
-
-function collectNormalizedIncidents(value: unknown) {
-  const items = getArray(value);
-
-  if (items) {
-    return items
-      .map((entry) => normalizeIncidentPayload(entry))
-      .filter((incident): incident is GatewayIncidentResponse => Boolean(incident));
-  }
-
-  const directIncident = normalizeIncidentPayload(value);
-  return directIncident ? [directIncident] : [];
-}
-
-function extractSessionKey(record: Record<string, unknown> | null | undefined) {
-  return firstString(
-    record?.sessionKey,
-    record?.conversationId,
-    record?.conversationKey,
-    record?.threadId,
-    asRecord(record?.session)?.key,
-    asRecord(record?.session)?.id
-  );
-}
-
-function normalizeSessionStatus(
-  value: string | undefined,
-  record: Record<string, unknown> | null | undefined,
-  fallback: GatewaySessionSnapshot['status'] | undefined
-) {
-  if (value) {
-    if (value === 'active' || value === 'streaming' || value === 'processing') {
-      return 'running';
-    }
-
-    if (value === 'idle' || value === 'connected') {
-      return 'succeeded';
-    }
-  }
-
-  if (firstBoolean(record?.active, record?.connected, record?.isActive)) {
-    return 'running';
-  }
-
-  if (firstString(record?.errorMessage, record?.error)) {
-    return 'failed';
-  }
-
-  return normalizeRunStatus(value ?? fallback ?? 'succeeded');
-}
-
-function normalizeAgentStatus(value: string | AgentStatus | undefined) {
-  switch (value) {
-    case 'online':
-    case 'busy':
-    case 'degraded':
-    case 'offline':
-      return value;
-    case 'active':
-    case 'ready':
-      return 'online';
-    case 'idle':
-      return 'busy';
-    case 'error':
-      return 'degraded';
-    default:
-      return 'offline';
-  }
-}
-
-function normalizeChannelType(value: string | null | undefined) {
-  switch (value) {
-    case 'discord':
-    case 'telegram':
-    case 'whatsapp':
-    case 'imessage':
-      return value;
-    default:
-      return null;
-  }
-}
-
-function normalizeRunStatus(value: string | undefined) {
-  switch (value) {
-    case 'queued':
-    case 'running':
-    case 'succeeded':
-    case 'failed':
-    case 'cancelled':
-    case 'degraded':
-      return value;
-    case 'complete':
-    case 'completed':
-    case 'success':
-      return 'succeeded';
-    case 'error':
-      return 'failed';
-    default:
-      return 'queued';
-  }
-}
-
-function normalizeIncidentSeverity(value: string | undefined) {
-  switch (value) {
-    case 'info':
-    case 'warning':
-    case 'critical':
-      return value;
-    case 'error':
-      return 'critical';
-    default:
-      return 'warning';
-  }
-}
-
-function normalizeIncidentStatus(value: string | undefined) {
-  switch (value) {
-    case 'open':
-    case 'acknowledged':
-    case 'resolved':
-      return value;
-    case 'closed':
-      return 'resolved';
-    default:
-      return 'open';
-  }
-}
-
-function normalizeMessageRole(value: string | undefined) {
-  switch (value) {
-    case 'user':
-    case 'assistant':
-    case 'system':
-    case 'tool':
-    case 'event':
-      return value;
-    default:
-      return 'assistant';
-  }
-}
-
-function normalizeMessageStatus(value: string | undefined) {
-  switch (value) {
-    case 'pending':
-    case 'streaming':
-    case 'complete':
-    case 'failed':
-      return value;
-    default:
-      return undefined;
-  }
-}
-
-function mapChatStateToRunStatus(value: string) {
-  switch (value) {
-    case 'delta':
-      return 'running';
-    case 'final':
-      return 'succeeded';
-    case 'aborted':
-      return 'cancelled';
-    case 'error':
-      return 'failed';
-    default:
-      return 'running';
-  }
-}
-
-function isAuthError(code?: string) {
-  return Boolean(
-    code &&
-      [
-        'AUTH_TOKEN_MISMATCH',
-        'AUTH_RATE_LIMITED',
-        'AUTH_UNAUTHORIZED',
-        'AUTH_TOKEN_MISSING',
-      ].includes(code)
-  );
-}
-
-function getArray(value: unknown) {
-  return Array.isArray(value) ? value : null;
-}
-
-function normalizeStringArray(value: unknown) {
-  const items = getArray(value);
-
-  if (!items) {
-    return null;
-  }
-
-  return items.filter((item): item is string => typeof item === 'string');
-}
-
-function dedupeStrings(items: (string | null | undefined)[]) {
-  return [...new Set(items.filter((item): item is string => typeof item === 'string' && item.length > 0))];
-}
-
-function dedupeById<T extends { id: string }>(items: T[]) {
-  const byId = new Map<string, T>();
-
-  items.forEach((item) => {
-    byId.set(item.id, item);
-  });
-
-  return [...byId.values()];
-}
-
-function asRecord(value: unknown) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function firstString(...values: unknown[]) {
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim().length > 0) {
-      return value;
-    }
-  }
-
-  return undefined;
-}
-
-function firstNumber(...values: unknown[]) {
-  for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return value;
-    }
-  }
-
-  return undefined;
-}
-
-function firstBoolean(...values: unknown[]) {
-  for (const value of values) {
-    if (typeof value === 'boolean') {
-      return value;
-    }
-  }
-
-  return undefined;
-}
-
-function safeHostname(value: string) {
-  try {
-    return new URL(value).hostname;
-  } catch {
-    return value;
-  }
-}
-
-function createId() {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
-  }
-
-  return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-}
-
-function cloneOverview(overview: GatewayOverviewResponse): GatewayOverviewResponse {
-  return {
-    ...overview,
-    gateway: { ...overview.gateway },
-    session: overview.session
-      ? {
-          ...overview.session,
-          metadata: overview.session.metadata ? { ...overview.session.metadata } : overview.session.metadata,
-        }
-      : overview.session,
-    stats: overview.stats ? { ...overview.stats } : overview.stats,
-    coordinator: overview.coordinator ? cloneAgent(overview.coordinator) : overview.coordinator,
-    agents: overview.agents.map(cloneAgent),
-    recentRuns: overview.recentRuns?.map(cloneRun),
-    incidents: overview.incidents?.map(cloneIncident),
-    activity: overview.activity?.map((entry) => ({ ...entry })),
-  };
-}
-
-function cloneAgent(agent: GatewayAgentResponse): GatewayAgentResponse {
-  return {
-    ...agent,
-    channels: agent.channels?.map(cloneChannel) ?? [],
-    currentRun: agent.currentRun ? cloneRun(agent.currentRun) : agent.currentRun,
-    allowedActions: agent.allowedActions?.slice(),
-    metadata: agent.metadata ? { ...agent.metadata } : agent.metadata,
-  };
-}
-
-function cloneChannel(channel: NonNullable<GatewayAgentResponse['channels']>[number]) {
-  return {
-    ...channel,
-  };
-}
-
-function cloneRun(run: GatewayRunResponse): GatewayRunResponse {
-  return {
-    ...run,
-    delegatedAgentIds: run.delegatedAgentIds?.slice(),
-    delegatedAgentNames: run.delegatedAgentNames?.slice(),
-    metadata: run.metadata ? { ...run.metadata } : run.metadata,
-  };
-}
-
-function cloneIncident(incident: GatewayIncidentResponse): GatewayIncidentResponse {
-  return {
-    ...incident,
-    metadata: incident.metadata ? { ...incident.metadata } : incident.metadata,
-  };
-}
-
-function cloneConversation(conversation: GatewayConversationResponse): GatewayConversationResponse {
-  return {
-    ...conversation,
-    messages: conversation.messages.map(cloneMessage),
-    events: conversation.events?.slice() ?? [],
-    latestRun: conversation.latestRun ? cloneRun(conversation.latestRun) : conversation.latestRun,
-  };
-}
-
-function cloneMessage(message: GatewayConversationMessageResponse): GatewayConversationMessageResponse {
-  return {
-    ...message,
-    metadata: message.metadata ? { ...message.metadata } : message.metadata,
-  };
 }
