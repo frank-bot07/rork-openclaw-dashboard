@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { View, Text, StyleSheet, Pressable, Animated, Modal, ScrollView, Platform } from 'react-native';
 import { MessageCircle, X } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -19,7 +19,8 @@ export default React.memo(function FloatingChatButton({ agents }: FloatingChatBu
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const glowAnim = useRef(new Animated.Value(0.3)).current;
 
-  const onlineAgents = agents.filter(a => a.status !== 'offline');
+  const onlineAgents = useMemo(() => agents.filter(a => a.status !== 'offline'), [agents]);
+  const offlineAgents = useMemo(() => agents.filter(a => a.status === 'offline'), [agents]);
 
   useEffect(() => {
     const pulse = Animated.loop(
@@ -101,10 +102,10 @@ export default React.memo(function FloatingChatButton({ agents }: FloatingChatBu
           </View>
 
           <ScrollView style={styles.pickerList} contentContainerStyle={styles.pickerListContent} showsVerticalScrollIndicator={false}>
-            {agents.filter(a => a.status !== 'offline').length > 0 && (
+            {onlineAgents.length > 0 && (
               <Text style={styles.pickerSectionLabel}>Online Now</Text>
             )}
-            {agents.filter(a => a.status !== 'offline').map((agent) => {
+            {onlineAgents.map((agent) => {
               const color = getAgentColor(agent.id);
               return (
                 <Pressable
@@ -126,10 +127,10 @@ export default React.memo(function FloatingChatButton({ agents }: FloatingChatBu
               );
             })}
 
-            {agents.filter(a => a.status === 'offline').length > 0 && (
+            {offlineAgents.length > 0 && (
               <Text style={[styles.pickerSectionLabel, { marginTop: 24 }]}>Offline</Text>
             )}
-            {agents.filter(a => a.status === 'offline').map((agent) => {
+            {offlineAgents.map((agent) => {
               const color = getAgentColor(agent.id);
               return (
                 <Pressable
