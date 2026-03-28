@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import { useSessionStore } from '@/stores/sessionStore';
@@ -84,11 +83,11 @@ export const openClawAuth = {
   },
 
   async saveGatewayUrl(gatewayUrl: string) {
-    await AsyncStorage.setItem(LAST_GATEWAY_URL_KEY, gatewayUrl.trim());
+    await setStoredItem(LAST_GATEWAY_URL_KEY, gatewayUrl.trim());
   },
 
   async getLastGatewayUrl() {
-    const gatewayUrl = await AsyncStorage.getItem(LAST_GATEWAY_URL_KEY);
+    const gatewayUrl = await getStoredItem(LAST_GATEWAY_URL_KEY);
     return gatewayUrl?.trim() ? gatewayUrl.trim() : null;
   },
 
@@ -120,7 +119,7 @@ export const openClawAuth = {
     }
 
     await Promise.all([
-      AsyncStorage.setItem(
+      setStoredItem(
         SESSION_METADATA_KEY,
         JSON.stringify({
           ...normalizedSession,
@@ -137,7 +136,7 @@ export const openClawAuth = {
   async getSession(): Promise<Session | null> {
     const [tokens, storedSession, lastGatewayUrl] = await Promise.all([
       this.getValidatedTokens(),
-      AsyncStorage.getItem(SESSION_METADATA_KEY),
+      getStoredItem(SESSION_METADATA_KEY),
       this.getLastGatewayUrl(),
     ]);
 
@@ -193,7 +192,7 @@ export const openClawAuth = {
   async clearSession() {
     await Promise.all([
       this.clearTokens(),
-      AsyncStorage.removeItem(SESSION_METADATA_KEY),
+      deleteStoredItem(SESSION_METADATA_KEY),
     ]);
   },
 
@@ -278,31 +277,42 @@ function isExpiredTimestamp(value?: string | null) {
   return Date.now() >= timestamp;
 }
 
-async function setStoredTokensRaw(value: string) {
+async function setStoredItem(key: string, value: string) {
   if (Platform.OS === 'web') {
-    const localStorage = getWebStorage();
-    localStorage?.setItem(SESSION_TOKENS_KEY, value);
+    getWebStorage()?.setItem(key, value);
     return;
   }
 
-  await SecureStore.setItemAsync(SESSION_TOKENS_KEY, value, SECURE_STORE_OPTIONS);
+  await SecureStore.setItemAsync(key, value, SECURE_STORE_OPTIONS);
+}
+
+async function getStoredItem(key: string) {
+  if (Platform.OS === 'web') {
+    return getWebStorage()?.getItem(key) ?? null;
+  }
+
+  return SecureStore.getItemAsync(key, SECURE_STORE_OPTIONS);
+}
+
+async function deleteStoredItem(key: string) {
+  if (Platform.OS === 'web') {
+    getWebStorage()?.removeItem(key);
+    return;
+  }
+
+  await SecureStore.deleteItemAsync(key, SECURE_STORE_OPTIONS);
+}
+
+async function setStoredTokensRaw(value: string) {
+  await setStoredItem(SESSION_TOKENS_KEY, value);
 }
 
 async function getStoredTokensRaw() {
-  if (Platform.OS === 'web') {
-    return getWebStorage()?.getItem(SESSION_TOKENS_KEY) ?? null;
-  }
-
-  return SecureStore.getItemAsync(SESSION_TOKENS_KEY, SECURE_STORE_OPTIONS);
+  return getStoredItem(SESSION_TOKENS_KEY);
 }
 
 async function deleteStoredTokens() {
-  if (Platform.OS === 'web') {
-    getWebStorage()?.removeItem(SESSION_TOKENS_KEY);
-    return;
-  }
-
-  await SecureStore.deleteItemAsync(SESSION_TOKENS_KEY, SECURE_STORE_OPTIONS);
+  await deleteStoredItem(SESSION_TOKENS_KEY);
 }
 
 function getWebStorage() {
