@@ -1011,9 +1011,15 @@ export class OpenClawClient {
       stats: {
         ...existingStats,
         totalAgents: agents.length,
-        onlineAgents: agents.filter((agent) => agent.status !== 'offline').length,
-        openIncidents: incidents.filter((incident) => incident.status !== 'resolved').length,
-        activeRuns: recentRuns.filter((run) => run.status === 'queued' || run.status === 'running').length,
+        onlineAgents: agents.reduce((acc, agent) => (agent.status !== 'offline' ? acc + 1 : acc), 0),
+        openIncidents: incidents.reduce(
+          (acc, incident) => (incident.status !== 'resolved' ? acc + 1 : acc),
+          0
+        ),
+        activeRuns: recentRuns.reduce(
+          (acc, run) => (run.status === 'queued' || run.status === 'running' ? acc + 1 : acc),
+          0
+        ),
       },
     };
   }
