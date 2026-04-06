@@ -69,7 +69,7 @@ export function parseSocketMessage(
       };
     }
   } catch (error) {
-    console.error('[OpenClaw] Ignoring malformed WebSocket payload.', error);
+    console.error('[OpenClaw] Ignoring malformed WebSocket payload:', error instanceof Error ? error.message : String(error));
   }
 
   return null;

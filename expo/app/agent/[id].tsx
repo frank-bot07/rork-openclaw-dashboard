@@ -25,6 +25,7 @@ import ToolEvent from '@/components/ToolEvent';
 import TypingIndicator from '@/components/TypingIndicator';
 import Colors from '@/constants/colors';
 import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
+import { toConnectionErrorMessage } from '@/lib/openclaw/connection';
 import { useAgentDetail } from '@/hooks/useAgentDetail';
 import { useConversation, useSendMessage } from '@/hooks/useConversation';
 import { createOpenClawEventsAdapter } from '@/lib/openclaw/events';
@@ -181,7 +182,7 @@ export default function AgentDetailScreen() {
           return;
         }
 
-        console.error('[AgentEvents] Subscription error.', error);
+        console.error('[AgentEvents] Subscription error:', toConnectionErrorMessage(error));
       },
     });
 

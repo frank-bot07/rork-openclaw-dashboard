@@ -65,7 +65,7 @@ export const openClawAuth = {
     try {
       return JSON.parse(rawValue) as SessionTokens;
     } catch (error) {
-      console.error('[Auth] Failed to parse stored tokens.', error);
+      console.error('[Auth] Failed to parse stored tokens:', error instanceof Error ? error.message : String(error));
       return null;
     }
   },
@@ -176,7 +176,7 @@ export const openClawAuth = {
           (typeof parsed.metadata?.gatewayVersion === 'string' ? parsed.metadata.gatewayVersion : null),
       };
     } catch (error) {
-      console.error('[Auth] Failed to parse stored session metadata.', error);
+      console.error('[Auth] Failed to parse stored session metadata:', error instanceof Error ? error.message : String(error));
 
       if (!lastGatewayUrl) {
         return null;

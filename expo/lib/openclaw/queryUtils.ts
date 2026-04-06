@@ -8,7 +8,7 @@ export async function safeInvalidateQueries(
   try {
     await queryClient.invalidateQueries({ queryKey });
   } catch (error) {
-    console.error(`[ReactQuery] Failed to invalidate ${label}.`, error);
+    console.error(`[ReactQuery] Failed to invalidate ${label}:`, error instanceof Error ? error.message : String(error));
   }
 }
 
