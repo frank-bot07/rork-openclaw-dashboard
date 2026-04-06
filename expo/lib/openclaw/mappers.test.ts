@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'bun:test';
-import { mapRunSummary } from './mappers';
-import type { GatewayRunResponse } from '@/types/openclaw';
+import { describe, expect, it, test, setSystemTime } from 'bun:test';
+import { mapRunSummary, mapAgentSummary } from './mappers';
+import type { GatewayRunResponse, GatewayAgentResponse } from '@/types/openclaw';
 
 describe('mapRunSummary', () => {
   const minimalRaw: GatewayRunResponse = {
@@ -166,6 +166,170 @@ describe('mapRunSummary', () => {
       const raw = { ...minimalRaw, status: 'failed' as const, canRetry: false };
       const result = mapRunSummary(raw);
       expect(result.canRetry).toBe(false);
+    });
+  });
+});
+
+describe("mapAgentSummary", () => {
+  const mockNow = new Date("2024-01-01T12:00:00Z");
+  setSystemTime(mockNow);
+
+  test("should map a full GatewayAgentResponse correctly", () => {
+    const raw: GatewayAgentResponse = {
+      id: "agent-1",
+      name: "Test Agent",
+      avatar: "https://example.com/avatar.png",
+      status: "online",
+      model: "gpt-4",
+      provider: "openai",
+      description: "A test agent description",
+      agentDir: "/path/to/agent",
+      lastActivityAt: "2024-01-01T11:50:00Z",
+      role: "specialist",
+      specialistType: "research",
+      isCoordinator: false,
+      channels: [
+        { id: "ch-1", type: "whatsapp", identifier: "12345", label: "My WhatsApp", connected: true }
+      ],
+      currentRun: {
+        id: "run-1",
+        agentId: "agent-1",
+        status: "running",
+        title: "Active Run",
+        createdAt: "2024-01-01T11:55:00Z",
+      },
+      allowedActions: ["restart"],
+      conversationId: "conv-1",
+      metadata: { key: "value" }
+    };
+
+    const result = mapAgentSummary(raw);
+
+    expect(result).toEqual({
+      id: "agent-1",
+      name: "Test Agent",
+      avatar: "https://example.com/avatar.png",
+      status: "online",
+      model: "gpt-4",
+      provider: "openai",
+      channels: [
+        { id: "ch-1", type: "whatsapp", identifier: "12345", label: "My WhatsApp", connected: true }
+      ],
+      lastActivity: "10m ago",
+      description: "A test agent description",
+      systemPrompt: "",
+      agentDir: "/path/to/agent",
+      role: "specialist",
+      specialistType: "research",
+      isCoordinator: false,
+      conversationId: "conv-1",
+      lastRun: expect.objectContaining({
+        id: "run-1",
+        status: "running",
+        title: "Active Run"
+      }),
+      allowedActions: ["restart"],
+      metadata: { key: "value" }
+    });
+  });
+
+  test("should use default values for missing optional fields", () => {
+    const raw: GatewayAgentResponse = {
+      id: "agent-2",
+      name: "Minimal Agent",
+      status: "busy"
+    };
+
+    const result = mapAgentSummary(raw);
+
+    expect(result.avatar).toBeNull();
+    expect(result.status).toBe("busy");
+    expect(result.model).toBe("unknown");
+    expect(result.provider).toBe("unknown");
+    expect(result.channels).toEqual([]);
+    expect(result.lastActivity).toBe("Never");
+    expect(result.description).toBe("Operational specialist");
+    expect(result.agentDir).toBe("");
+    expect(result.role).toBe("specialist");
+    expect(result.specialistType).toBeNull();
+    expect(result.isCoordinator).toBe(false);
+    expect(result.conversationId).toBeNull();
+    expect(result.lastRun).toBeNull();
+    expect(result.allowedActions).toEqual([]);
+    expect(result.metadata).toBeUndefined();
+  });
+
+  describe("fallbackAgentDescription", () => {
+    test("should return 'Primary coordinator agent' if isCoordinator is true", () => {
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", isCoordinator: true };
+      expect(mapAgentSummary(raw).description).toBe("Primary coordinator agent");
+    });
+
+    test("should return 'Primary coordinator agent' if role is 'coordinator'", () => {
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", role: "coordinator" };
+      expect(mapAgentSummary(raw).description).toBe("Primary coordinator agent");
+    });
+
+    test("should return specialist description if specialistType is provided", () => {
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", specialistType: "Coding" };
+      expect(mapAgentSummary(raw).description).toBe("Coding specialist");
+    });
+
+    test("should return 'Operational specialist' by default", () => {
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online" };
+      expect(mapAgentSummary(raw).description).toBe("Operational specialist");
+    });
+
+    test("should trim description if provided", () => {
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", description: "  Custom Description  " };
+      expect(mapAgentSummary(raw).description).toBe("Custom Description");
+    });
+  });
+
+  describe("formatTimeAgo", () => {
+    test("should return 'Never' for null timestamp", () => {
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", lastActivityAt: null };
+      expect(mapAgentSummary(raw).lastActivity).toBe("Never");
+    });
+
+    test("should return 'Just now' for very recent timestamp", () => {
+      const recent = new Date(mockNow.getTime() - 30 * 1000).toISOString();
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", lastActivityAt: recent };
+      expect(mapAgentSummary(raw).lastActivity).toBe("Just now");
+    });
+
+    test("should return 'Xm ago' for minutes", () => {
+      const tenMins = new Date(mockNow.getTime() - 10 * 60 * 1000).toISOString();
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", lastActivityAt: tenMins };
+      expect(mapAgentSummary(raw).lastActivity).toBe("10m ago");
+    });
+
+    test("should return 'Xh ago' for hours", () => {
+      const fiveHours = new Date(mockNow.getTime() - 5 * 60 * 60 * 1000).toISOString();
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", lastActivityAt: fiveHours };
+      expect(mapAgentSummary(raw).lastActivity).toBe("5h ago");
+    });
+
+    test("should return 'Xd ago' for days", () => {
+      const threeDays = new Date(mockNow.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString();
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", lastActivityAt: threeDays };
+      expect(mapAgentSummary(raw).lastActivity).toBe("3d ago");
+    });
+  });
+
+  describe("role and isCoordinator logic", () => {
+    test("should infer role from isCoordinator if role is missing", () => {
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", isCoordinator: true };
+      const result = mapAgentSummary(raw);
+      expect(result.role).toBe("coordinator");
+      expect(result.isCoordinator).toBe(true);
+    });
+
+    test("should infer isCoordinator from role if isCoordinator is missing", () => {
+      const raw: GatewayAgentResponse = { id: "1", name: "A", status: "online", role: "coordinator" };
+      const result = mapAgentSummary(raw);
+      expect(result.isCoordinator).toBe(true);
+      expect(result.role).toBe("coordinator");
     });
   });
 });
