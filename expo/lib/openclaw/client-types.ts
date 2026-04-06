@@ -147,12 +147,14 @@ export type OpenClawRequestSender = (
 ) => Promise<unknown>;
 
 export const DEFAULT_TIMEOUT_MS = 10_000;
+export const DEFAULT_BASE_RECONNECT_DELAY_MS = 750;
+export const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000;
 export const DEFAULT_RECONNECT_CONFIG: OpenClawReconnectConfig = {
   enabled: true,
-  baseDelayMs: 750,
-  maxDelayMs: 30_000,
+  baseDelayMs: DEFAULT_BASE_RECONNECT_DELAY_MS,
+  maxDelayMs: DEFAULT_MAX_RECONNECT_DELAY_MS,
 };
 export const DEFAULT_SCOPES = ['operator.admin', 'operator.approvals', 'operator.pairing'];
 export const DEFAULT_CAPS = ['tool-events'];
 export const SUPPORTED_PROTOCOL_VERSION = 3;
-export const GATEWAY_DATA_REFRESH_INTERVAL_MS = 30_000;
+export const API_POLLING_INTERVAL_MS = 30_000;

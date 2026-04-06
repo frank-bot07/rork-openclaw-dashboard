@@ -24,7 +24,7 @@ import type {
   SnapshotState,
 } from '@/lib/openclaw/client-types';
 import {
-  GATEWAY_DATA_REFRESH_INTERVAL_MS,
+  API_POLLING_INTERVAL_MS,
   SUPPORTED_PROTOCOL_VERSION,
 } from '@/lib/openclaw/client-types';
 import {
@@ -184,7 +184,7 @@ export class OpenClawClientDataStore {
   async refreshGatewayData(signal?: AbortSignal, force = false) {
     if (
       !force &&
-      Date.now() - this.lastGatewayDataRefreshAt < GATEWAY_DATA_REFRESH_INTERVAL_MS &&
+      Date.now() - this.lastGatewayDataRefreshAt < API_POLLING_INTERVAL_MS &&
       this.snapshot.agentsById.size > 0
     ) {
       return;
