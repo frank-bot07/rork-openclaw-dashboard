@@ -18,7 +18,7 @@ export function normalizeGatewayUrl(input: string) {
     throw new Error('Enter your gateway URL.');
   }
 
-  const normalizedInput = /^https?:\/\//i.test(trimmed)
+  const normalizedInput = /^[a-z]+:\/\//i.test(trimmed)
     ? trimmed
     : `${isLocalGatewayInput(trimmed) ? 'http' : 'https'}://${trimmed}`;
 
@@ -45,7 +45,7 @@ export function normalizeGatewayUrl(input: string) {
     throw new Error('Gateway URL cannot include query parameters or fragments.');
   }
 
-  if (url.pathname && url.pathname !== '/') {
+  if (url.pathname && !/^\/+$/.test(url.pathname)) {
     throw new Error('Enter the gateway origin only, without extra paths.');
   }
 
@@ -87,8 +87,8 @@ export function buildSessionFromOverview(
     connectedAt: previousSession?.connectedAt ?? new Date().toISOString(),
     capabilities: {
       ...DEFAULT_GATEWAY_CAPABILITIES,
-      ...overview.gateway.capabilities,
       ...previousSession?.capabilities,
+      ...overview.gateway.capabilities,
       ...rawSession.capabilities,
     },
     issuedAt: rawSession.issuedAt ?? previousSession?.issuedAt ?? null,
@@ -158,7 +158,7 @@ export function toConnectionErrorMessage(error: unknown) {
 }
 
 function isLocalGatewayInput(value: string) {
-  const withoutScheme = value.replace(/^https?:\/\//i, '');
+  const withoutScheme = value.replace(/^[a-z]+:\/\//i, '');
   const hostWithPort = withoutScheme.split('/')[0] ?? withoutScheme;
 
   if (!hostWithPort) {
