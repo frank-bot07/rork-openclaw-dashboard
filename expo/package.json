@@ -6,7 +6,7 @@
     "start": "bunx rork start -p ychfnayvxclk2glgwfvxt --tunnel",
     "start-web": "bunx rork start -p ychfnayvxclk2glgwfvxt --web --tunnel",
     "start-web-dev": "DEBUG=expo* bunx rork start -p ychfnayvxclk2glgwfvxt --web --tunnel",
-    "lint": "expo lint"
+    "lint": "eslint app components hooks lib providers stores constants --ext .ts,.tsx"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
