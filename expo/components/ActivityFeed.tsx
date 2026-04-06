@@ -6,6 +6,7 @@ import {
 } from 'lucide-react-native';
 import Colors from '@/constants/colors';
 import { ActivityEntry, ActivityType } from '@/types/openclaw';
+import { formatTimeAgo } from '@/lib/datetime';
 
 const ACTIVITY_ICONS: Record<ActivityType, React.ComponentType<{ size: number; color: string }>> = {
   message: MessageSquare,
@@ -22,19 +23,6 @@ const ACTIVITY_COLORS: Record<ActivityType, string> = {
   system: '#7C5CE7',
   channel: Colors.success,
 };
-
-function formatTimeAgo(timestamp: string): string {
-  const now = new Date();
-  const then = new Date(timestamp);
-  const diffMs = now.getTime() - then.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-
-  if (diffMin < 1) return 'now';
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  return `${Math.floor(diffHr / 24)}d ago`;
-}
 
 interface ActivityFeedProps {
   activities: ActivityEntry[];

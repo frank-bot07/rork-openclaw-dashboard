@@ -3,6 +3,7 @@
  * Keeps backend contract changes out of screen components.
  */
 import { DEFAULT_GATEWAY_CAPABILITIES } from '@/lib/openclaw/auth';
+import { formatTimeAgo } from '@/lib/datetime';
 import type {
   ActivityEntry,
   Agent,
@@ -27,20 +28,6 @@ import type {
   RunStatus,
   RunSummary,
 } from '@/types/openclaw';
-
-function formatTimeAgo(timestamp: string | null | undefined): string {
-  if (!timestamp) return 'Never';
-  const now = Date.now();
-  const then = new Date(timestamp).getTime();
-  const diffMs = now - then;
-  const diffMin = Math.floor(diffMs / 60_000);
-  if (diffMin < 1) return 'Just now';
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDays = Math.floor(diffHr / 24);
-  return `${diffDays}d ago`;
-}
 
 function fallbackAgentDescription(raw: GatewayAgentResponse) {
   if (raw.isCoordinator || raw.role === 'coordinator') {
