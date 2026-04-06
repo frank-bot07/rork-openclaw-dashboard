@@ -12,6 +12,7 @@ import { getAgentColor, getStatusRingColor } from '@/constants/agentColors';
 import StatusDot from '@/components/StatusDot';
 import FloatingChatButton from '@/components/FloatingChatButton';
 import ErrorStateCard from '@/components/ErrorStateCard';
+import ActivityFeed from '@/components/ActivityFeed';
 import { DashboardSkeleton } from '@/components/SkeletonLoader';
 import { useSessionStore } from '@/stores/sessionStore';
 
@@ -256,6 +257,13 @@ export default function DashboardScreen() {
               );
             })}
           </View>
+
+          {overview.data?.activity && overview.data.activity.length > 0 && (
+            <ActivityFeed
+              activities={overview.data.activity}
+              onAgentPress={handleAgentPress}
+            />
+          )}
 
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>System Health</Text>

@@ -4,6 +4,7 @@ import { AlertTriangle, Bot } from 'lucide-react-native';
 import Colors from '@/constants/colors';
 import PressableCard from '@/components/PressableCard';
 import type { Incident, IncidentSeverity } from '@/types/openclaw';
+import { formatTimeAgo } from '@/lib/datetime';
 
 interface IncidentCardProps {
   incident: Incident;
@@ -100,35 +101,6 @@ export default function IncidentCard({ incident, onPress }: IncidentCardProps) {
       </View>
     </PressableCard>
   );
-}
-
-function formatTimeAgo(timestamp: string | null | undefined) {
-  if (!timestamp) {
-    return 'Unknown';
-  }
-
-  const diffMs = Date.now() - new Date(timestamp).getTime();
-  const diffMinutes = Math.floor(diffMs / 60_000);
-
-  if (diffMinutes < 1) {
-    return 'Just now';
-  }
-
-  if (diffMinutes < 60) {
-    return `${diffMinutes}m ago`;
-  }
-
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) {
-    return `${diffHours}h ago`;
-  }
-
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 7) {
-    return `${diffDays}d ago`;
-  }
-
-  return new Date(timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 const styles = StyleSheet.create({
