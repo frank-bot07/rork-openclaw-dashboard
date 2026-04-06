@@ -1,4 +1,4 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
+import React, { Component, ReactNode } from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { AlertTriangle } from 'lucide-react-native';
 import Colors from '@/constants/colors';
@@ -20,11 +20,6 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   static getDerivedStateFromError(error: Error): State {
     return { hasError: true, error };
-  }
-
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.log('[ErrorBoundary] Caught error:', error.message);
-    console.log('[ErrorBoundary] Component stack:', errorInfo.componentStack);
   }
 
   handleReset = () => {
