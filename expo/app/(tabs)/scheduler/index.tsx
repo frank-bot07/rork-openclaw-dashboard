@@ -209,6 +209,23 @@ export default function RunsScreen() {
     [queryClient, retryRunMutation]
   );
 
+  const handleRunPress = useCallback((run: RunSummary) => {
+    if (run.agentId) {
+      router.push(`/agent/${run.agentId}`);
+    }
+  }, [router]);
+
+  const handleIncidentPress = useCallback((incident: Incident) => {
+    if (incident.agentId) {
+      router.push(`/agent/${incident.agentId}`);
+    }
+  }, [router]);
+
+  const isRunRetrying = useCallback(
+    (runId: string) => retryRunMutation.isPending && retryRunMutation.variables === runId,
+    [retryRunMutation.isPending, retryRunMutation.variables]
+  );
+
   return (
     <View style={styles.container}>
       <ScrollView
@@ -336,11 +353,7 @@ export default function RunsScreen() {
                   <IncidentCard
                     key={incident.id}
                     incident={incident}
-                    onPress={
-                      incident.agentId
-                        ? () => router.push(`/agent/${incident.agentId}`)
-                        : undefined
-                    }
+                    onPress={incident.agentId ? () => handleIncidentPress(incident) : undefined}
                   />
                 ))}
               </View>
@@ -362,30 +375,14 @@ export default function RunsScreen() {
             ) : filteredSections.length > 0 ? (
               <View style={styles.sectionList}>
                 {filteredSections.map((section) => (
-                  <View key={section.key} style={styles.runGroup}>
-                    {selectedFilter === 'all' ? (
-                      <View style={styles.groupHeader}>
-                        <Text style={styles.groupTitle}>{section.title}</Text>
-                        <Text style={styles.groupCount}>{section.runs.length}</Text>
-                      </View>
-                    ) : null}
-
-                    <View style={styles.runList}>
-                      {section.runs.map((run) => (
-                        <RunCard
-                          key={run.id}
-                          run={run}
-                          onPress={() => {
-                            if (run.agentId) {
-                              router.push(`/agent/${run.agentId}`);
-                            }
-                          }}
-                          onRetry={handleRetryRun}
-                          isRetrying={retryRunMutation.isPending && retryRunMutation.variables === run.id}
-                        />
-                      ))}
-                    </View>
-                  </View>
+                  <RunGroup
+                    key={section.key}
+                    section={section}
+                    showTitle={selectedFilter === 'all'}
+                    onRunPress={handleRunPress}
+                    onRetry={handleRetryRun}
+                    isRetrying={isRunRetrying}
+                  />
                 ))}
               </View>
             ) : (
@@ -816,3 +813,40 @@ const styles = StyleSheet.create({
     height: 110,
   },
 });
+
+function RunGroup({
+  section,
+  showTitle,
+  onRunPress,
+  onRetry,
+  isRetrying,
+}: {
+  section: { key: string; title: string; runs: RunSummary[] };
+  showTitle: boolean;
+  onRunPress: (run: RunSummary) => void;
+  onRetry: (run: RunSummary) => void;
+  isRetrying: (runId: string) => boolean;
+}) {
+  return (
+    <View style={styles.runGroup}>
+      {showTitle ? (
+        <View style={styles.groupHeader}>
+          <Text style={styles.groupTitle}>{section.title}</Text>
+          <Text style={styles.groupCount}>{section.runs.length}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.runList}>
+        {section.runs.map((run) => (
+          <RunCard
+            key={run.id}
+            run={run}
+            onPress={() => onRunPress(run)}
+            onRetry={onRetry}
+            isRetrying={isRetrying(run.id)}
+          />
+        ))}
+      </View>
+    </View>
+  );
+}
