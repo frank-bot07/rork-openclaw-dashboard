@@ -6,6 +6,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import Colors from '@/constants/colors';
 import { openClawAuth } from '@/lib/openclaw/auth';
+import { toConnectionErrorMessage } from '@/lib/openclaw/connection';
 import { OpenClawProvider } from '@/providers/OpenClawProvider';
 import { useSessionStore } from '@/stores/sessionStore';
 
@@ -43,7 +44,7 @@ function RootLayoutNav() {
           clearSession();
         }
       } catch (error) {
-        console.error('[Bootstrap] Failed to restore stored session.', error);
+        console.error('[Bootstrap] Failed to restore stored session:', toConnectionErrorMessage(error));
 
         if (!isMounted) {
           return;

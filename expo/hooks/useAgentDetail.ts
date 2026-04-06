@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { OpenClawClient } from '@/lib/openclaw/client';
 import { mapAgentDetail } from '@/lib/openclaw/mappers';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
+import { toConnectionErrorMessage } from '@/lib/openclaw/connection';
 import { safeInvalidateMany } from '@/lib/openclaw/queryUtils';
 
 export function useAgentDetail(client: OpenClawClient | null, agentId: string | undefined) {
@@ -19,9 +20,7 @@ export function useAgentDetail(client: OpenClawClient | null, agentId: string | 
         const raw = await client.getAgent(agentId);
         queryClient.setQueryData(queryKeys.agents.detail(agentId), mapAgentDetail(raw));
       } catch (error) {
-        if (error instanceof Error) {
-          console.error('[AgentDetail] Failed to sync agent detail cache.', error);
-        }
+        console.error('[AgentDetail] Failed to sync agent detail cache:', toConnectionErrorMessage(error));
       }
     };
 

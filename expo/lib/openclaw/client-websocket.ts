@@ -233,7 +233,7 @@ export class OpenClawClientWebSocket {
         .bootstrapGatewayData()
         .catch((error) => {
           const normalized = normalizeError(error, 'Failed to load gateway data.');
-          console.error('[OpenClaw] Failed to bootstrap gateway data.', normalized);
+          console.error('[OpenClaw] Failed to bootstrap gateway data:', normalized.message);
         })
         .finally(() => {
           this.resolveConnectPromise(this.config.data.peekOverview() ?? overview);
