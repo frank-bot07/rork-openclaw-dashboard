@@ -9,6 +9,7 @@ import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
 import { useSessionStore } from '@/stores/sessionStore';
 import { openClawAuth } from '@/lib/openclaw/auth';
+import { useOpenClawClient } from '@/providers/OpenClawProvider';
 import ConnectionStatusBadge from '@/components/ConnectionStatusBadge';
 import PressableCard from '@/components/PressableCard';
 import { useRouter } from 'expo-router';
@@ -17,6 +18,7 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { connectionState, gatewayUrl, session, clearSession } = useSessionStore();
+  const client = useOpenClawClient();
   const [isTesting, setIsTesting] = useState(false);
   const [darkMode, setDarkMode] = useState(true);
   const [notifications, setNotifications] = useState(true);
@@ -26,17 +28,22 @@ export default function SettingsScreen() {
     setIsTesting(true);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     try {
-      // In production, this calls the real gateway health endpoint
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      if (!client) {
+        throw new Error('No active client');
+      }
+      const start = Date.now();
+      await client.getOverview();
+      const latency = Date.now() - start;
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Alert.alert('Connection Healthy', 'Gateway is responding normally.');
-    } catch {
+      Alert.alert('Connection Healthy', `Gateway responded in ${latency}ms.`);
+    } catch (error) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      Alert.alert('Connection Failed', 'Could not reach the gateway.');
+      const message = error instanceof Error ? error.message : 'Could not reach the gateway.';
+      Alert.alert('Connection Failed', message);
     } finally {
       setIsTesting(false);
     }
-  }, []);
+  }, [client]);
 
   const handleDisconnect = useCallback(() => {
     Alert.alert(

@@ -134,13 +134,14 @@ export const [OpenClawProvider, useOpenClaw] = createContextHook<OpenClawContext
           : connectionState === 'reconnecting' || connectionState === 'connecting'
             ? 'degraded'
             : 'down',
-      latencyMs: overview?.gateway.latencyMs ?? 0,
+      latencyMs: readNumber(overview?.gateway.latencyMs) ?? 0,
       lastPing:
-        overview?.gateway.lastSyncAt ??
-        session?.lastValidatedAt ??
-        session?.connectedAt ??
+        readString(overview?.gateway.lastSyncAt) ??
+        readString(session?.lastValidatedAt) ??
+        readString(session?.connectedAt) ??
         new Date().toISOString(),
-      uptimePercent: connectionState === 'connected' ? 100 : connectionState === 'reconnecting' ? 50 : 0,
+      uptimePercent:
+        connectionState === 'connected' ? 100 : connectionState === 'reconnecting' ? 50 : 0,
     };
 
     const agentHeartbeats = (agentsQuery.data ?? []).map<HeartbeatEntry>((agent) => ({
