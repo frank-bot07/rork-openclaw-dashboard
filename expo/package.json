@@ -27,6 +27,7 @@
     "expo-linking": "~8.0.10",
     "expo-location": "~19.0.8",
     "expo-router": "~6.0.17",
+    "expo-crypto": "~14.0.1",
     "expo-secure-store": "^55.0.8",
     "expo-splash-screen": "~31.0.12",
     "expo-status-bar": "~3.0.9",
