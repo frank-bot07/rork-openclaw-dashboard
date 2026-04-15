@@ -24,6 +24,11 @@ mock.module('expo-secure-store', () => ({
   deleteItemAsync: mock(() => Promise.resolve()),
 }));
 
+// Mock expo-crypto
+mock.module('expo-crypto', () => ({
+  randomUUID: mock(() => '00000000-0000-4000-8000-000000000000'),
+}));
+
 // Mock sessionStore
 mock.module('@/stores/sessionStore', () => ({
   useSessionStore: {

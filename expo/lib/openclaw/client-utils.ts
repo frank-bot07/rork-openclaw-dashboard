@@ -1,3 +1,4 @@
+import * as Crypto from 'expo-crypto';
 import type {
   OpenClawClientConfig,
   OpenClawPushEventMessage,
@@ -201,9 +202,5 @@ export function safeHostname(value: string) {
 }
 
 export function createId() {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
-  }
-
-  return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  return Crypto.randomUUID();
 }
