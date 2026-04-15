@@ -37,17 +37,22 @@ mock.module('@/stores/sessionStore', () => ({
 
 import { openClawAuth } from './auth';
 
+declare global {
+  // eslint-disable-next-line no-var
+  var isSecureContext: boolean;
+}
+
 describe('openClawAuth', () => {
   beforeEach(() => {
     // Reset global state
-    globalThis.sessionStorage = undefined as any;
+    globalThis.sessionStorage = undefined as unknown as Storage;
     globalThis.isSecureContext = true;
-    (Platform as any).OS = 'ios';
+    (Platform as { OS: 'ios' | 'android' | 'web' }).OS = 'ios';
   });
 
   describe('SecureStore (Native)', () => {
     it('should use SecureStore on native platforms', async () => {
-      (Platform as any).OS = 'ios';
+      (Platform as { OS: 'ios' | 'android' | 'web' }).OS = 'ios';
       const setSpy = spyOn(SecureStore, 'setItemAsync');
 
       await openClawAuth.saveTokens({ accessToken: 'test-token' });
@@ -58,18 +63,22 @@ describe('openClawAuth', () => {
 
   describe('Web Storage (Web)', () => {
     beforeEach(() => {
-      (Platform as any).OS = 'web';
+      (Platform as { OS: 'ios' | 'android' | 'web' }).OS = 'web';
 
       // Mock sessionStorage
       const store: Record<string, string> = {};
       globalThis.sessionStorage = {
         getItem: (key: string) => store[key] || null,
-        setItem: (key: string, value: string) => { store[key] = value; },
-        removeItem: (key: string) => { delete store[key]; },
+        setItem: (key: string, value: string) => {
+          store[key] = value;
+        },
+        removeItem: (key: string) => {
+          delete store[key];
+        },
         clear: () => {},
         length: 0,
         key: (index: number) => null,
-      } as any;
+      } as Storage;
     });
 
     it('should use sessionStorage on web platform', async () => {
@@ -90,7 +99,7 @@ describe('openClawAuth', () => {
     });
 
     it('should handle missing sessionStorage', async () => {
-      globalThis.sessionStorage = undefined as any;
+      globalThis.sessionStorage = undefined as unknown as Storage;
 
       // Should not throw
       await openClawAuth.saveTokens({ accessToken: 'no-storage-token' });
