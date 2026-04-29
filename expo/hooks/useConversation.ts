@@ -244,11 +244,11 @@ function mergeMessages(messages: ChatMessage[]) {
   }
 
   return [...byId.values()].sort((left, right) => {
-    const leftTime = new Date(left.timestamp).getTime();
-    const rightTime = new Date(right.timestamp).getTime();
+    const leftTime = left.timestamp;
+    const rightTime = right.timestamp;
 
     if (leftTime !== rightTime) {
-      return leftTime - rightTime;
+      return leftTime > rightTime ? 1 : -1;
     }
 
     return left.id.localeCompare(right.id);
