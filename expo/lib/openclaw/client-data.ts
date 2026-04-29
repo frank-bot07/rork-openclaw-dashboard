@@ -1551,33 +1551,35 @@ function sortAgents(items: GatewayAgentResponse[]) {
 
 function sortSessionSnapshots(items: GatewaySessionSnapshot[]) {
   return items.sort((left, right) => {
-    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    const leftTime = left.updatedAt;
+    const rightTime = right.updatedAt;
+    return rightTime > leftTime ? 1 : rightTime < leftTime ? -1 : 0;
   });
 }
 
 function sortRuns(items: GatewayRunResponse[]) {
   return items.sort((left, right) => {
-    const leftTime = Date.parse(left.updatedAt ?? left.createdAt);
-    const rightTime = Date.parse(right.updatedAt ?? right.createdAt);
-    return rightTime - leftTime;
+    const leftTime = left.updatedAt ?? left.createdAt;
+    const rightTime = right.updatedAt ?? right.createdAt;
+    return rightTime > leftTime ? 1 : rightTime < leftTime ? -1 : 0;
   });
 }
 
 function sortIncidents(items: GatewayIncidentResponse[]) {
   return items.sort((left, right) => {
-    const leftTime = Date.parse(left.updatedAt ?? left.createdAt);
-    const rightTime = Date.parse(right.updatedAt ?? right.createdAt);
-    return rightTime - leftTime;
+    const leftTime = left.updatedAt ?? left.createdAt;
+    const rightTime = right.updatedAt ?? right.createdAt;
+    return rightTime > leftTime ? 1 : rightTime < leftTime ? -1 : 0;
   });
 }
 
 function sortConversationMessages(items: GatewayConversationMessageResponse[]) {
   return items.sort((left, right) => {
-    const leftTime = Date.parse(left.createdAt);
-    const rightTime = Date.parse(right.createdAt);
+    const leftTime = left.createdAt;
+    const rightTime = right.createdAt;
 
     if (leftTime !== rightTime) {
-      return leftTime - rightTime;
+      return leftTime > rightTime ? 1 : -1;
     }
 
     return left.id.localeCompare(right.id);
