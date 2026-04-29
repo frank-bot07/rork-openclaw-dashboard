@@ -205,5 +205,11 @@ export function createId() {
     return globalThis.crypto.randomUUID();
   }
 
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    const array = new Uint32Array(1);
+    globalThis.crypto.getRandomValues(array);
+    return `${Date.now()}-${array[0].toString(16).padStart(8, '0')}`;
+  }
+
   return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
