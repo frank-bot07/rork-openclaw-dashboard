@@ -104,8 +104,21 @@ export default function RunsScreen() {
     () => filteredAllRuns.filter((run) => run.status === 'cancelled'),
     [filteredAllRuns]
   );
-  const activeIds = useMemo(() => new Set(filteredActiveRuns.map((run) => run.id)), [filteredActiveRuns]);
-  const failedIds = useMemo(() => new Set(filteredFailedRuns.map((run) => run.id)), [filteredFailedRuns]);
+  const activeIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const run of filteredActiveRuns) {
+      ids.add(run.id);
+    }
+    return ids;
+  }, [filteredActiveRuns]);
+
+  const failedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const run of filteredFailedRuns) {
+      ids.add(run.id);
+    }
+    return ids;
+  }, [filteredFailedRuns]);
   const recentOnlyRuns = useMemo(
     () => filteredRecentRuns.filter((run) => !activeIds.has(run.id) && !failedIds.has(run.id)),
     [activeIds, failedIds, filteredRecentRuns]
