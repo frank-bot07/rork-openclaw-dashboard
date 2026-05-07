@@ -317,20 +317,7 @@ async function deleteStoredTokens() {
 
 function getWebStorage() {
   warnWebStorageFallback();
-
-  if (typeof globalThis.isSecureContext === 'boolean' && !globalThis.isSecureContext) {
-    console.error(
-      '[Auth] Storage is unavailable in insecure contexts. Session persistence is disabled.'
-    );
-    return null;
-  }
-
-  if (typeof globalThis.sessionStorage === 'undefined') {
-    console.error('[Auth] sessionStorage is unavailable on web. Session persistence is disabled.');
-    return null;
-  }
-
-  return globalThis.sessionStorage;
+  return null;
 }
 
 function warnWebStorageFallback() {
@@ -339,7 +326,5 @@ function warnWebStorageFallback() {
   }
 
   hasWarnedWebStorageFallback = true;
-  console.warn(
-    '[Auth] SecureStore is unavailable on web. Falling back to sessionStorage (ephemeral).'
-  );
+  console.warn('[Auth] SecureStore is unavailable on web. Session persistence is disabled.');
 }

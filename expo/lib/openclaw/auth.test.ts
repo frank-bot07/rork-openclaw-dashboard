@@ -81,24 +81,15 @@ describe('openClawAuth', () => {
       } as Storage;
     });
 
-    it('should use sessionStorage on web platform', async () => {
+    it('should not use sessionStorage on web platform (persistence disabled)', async () => {
       const setSpy = spyOn(globalThis.sessionStorage, 'setItem');
 
       await openClawAuth.saveTokens({ accessToken: 'web-token' });
 
-      expect(setSpy).toHaveBeenCalledWith('openclaw.session.tokens', JSON.stringify({ accessToken: 'web-token' }));
-    });
-
-    it('should not store tokens if not in a secure context', async () => {
-      globalThis.isSecureContext = false;
-      const setSpy = spyOn(globalThis.sessionStorage, 'setItem');
-
-      await openClawAuth.saveTokens({ accessToken: 'insecure-token' });
-
       expect(setSpy).not.toHaveBeenCalled();
     });
 
-    it('should handle missing sessionStorage', async () => {
+    it('should handle missing storage gracefully', async () => {
       globalThis.sessionStorage = undefined as unknown as Storage;
 
       // Should not throw
