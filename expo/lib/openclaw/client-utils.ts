@@ -205,5 +205,11 @@ export function createId() {
     return globalThis.crypto.randomUUID();
   }
 
-  return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    const buffer = new Uint32Array(2);
+    globalThis.crypto.getRandomValues(buffer);
+    return `${Date.now()}-${buffer[0].toString(16)}-${buffer[1].toString(16)}`;
+  }
+
+  throw new Error('No secure entropy source available for ID generation.');
 }
