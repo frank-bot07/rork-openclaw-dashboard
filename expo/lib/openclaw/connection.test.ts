@@ -102,17 +102,28 @@ describe("normalizeGatewayUrl", () => {
   test("adds http to local hostnames", () => {
     expect(normalizeGatewayUrl("localhost")).toBe("http://localhost");
     expect(normalizeGatewayUrl("127.0.0.1")).toBe("http://127.0.0.1");
+    expect(normalizeGatewayUrl("10.0.0.1")).toBe("http://10.0.0.1");
+    expect(normalizeGatewayUrl("172.16.0.1")).toBe("http://172.16.0.1");
     expect(normalizeGatewayUrl("192.168.1.1")).toBe("http://192.168.1.1");
+    expect(normalizeGatewayUrl("[::1]")).toBe("http://[::1]");
   });
 
-  test("preserves existing protocol", () => {
+  test("preserves and normalizes protocol", () => {
     expect(normalizeGatewayUrl("http://example.com")).toBe("http://example.com");
     expect(normalizeGatewayUrl("https://localhost")).toBe("https://localhost");
+    expect(normalizeGatewayUrl("HTTP://example.com")).toBe("http://example.com");
+    expect(normalizeGatewayUrl("hTtPs://example.com")).toBe("https://example.com");
   });
 
   test("removes trailing slashes", () => {
     expect(normalizeGatewayUrl("https://example.com/")).toBe("https://example.com");
     expect(normalizeGatewayUrl("https://example.com///")).toBe("https://example.com");
+  });
+
+  test("handles port numbers", () => {
+    expect(normalizeGatewayUrl("localhost:3000")).toBe("http://localhost:3000");
+    expect(normalizeGatewayUrl("example.com:8080")).toBe("https://example.com:8080");
+    expect(normalizeGatewayUrl("[::1]:3000")).toBe("http://[::1]:3000");
   });
 
   test("throws error for empty input", () => {
@@ -155,6 +166,8 @@ describe("getGatewayUrlWarning", () => {
   test("returns local network warning for local HTTP", () => {
     expect(getGatewayUrlWarning("http://localhost")).toBe("Non-HTTPS is only safe on a trusted local network.");
     expect(getGatewayUrlWarning("http://127.0.0.1")).toBe("Non-HTTPS is only safe on a trusted local network.");
+    expect(getGatewayUrlWarning("http://10.0.0.1")).toBe("Non-HTTPS is only safe on a trusted local network.");
+    expect(getGatewayUrlWarning("http://[::1]")).toBe("Non-HTTPS is only safe on a trusted local network.");
   });
 
   test("returns exposed token warning for remote HTTP", () => {
