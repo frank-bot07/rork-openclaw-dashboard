@@ -272,9 +272,13 @@ export class OpenClawClientDataStore {
       ...(input.defaultAgentId ? [input.defaultAgentId] : []),
     ]);
 
+    const overviewAgentsById = new Map(
+      (this.snapshot.overview?.agents ?? []).map((agent) => [agent.id, agent])
+    );
+
     for (const agentId of allAgentIds) {
       const identity = identitiesByAgentId.get(agentId);
-      const fallback = this.snapshot.overview?.agents.find((agent) => agent.id === agentId);
+      const fallback = overviewAgentsById.get(agentId);
       const agent = normalizeAgentPayload(
         {
           id: agentId,
