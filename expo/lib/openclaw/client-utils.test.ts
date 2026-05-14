@@ -50,16 +50,10 @@ describe('createId', () => {
     expect(id).toMatch(/^\d+-abcdef12$/);
   });
 
-  it('falls back to Math.random if crypto is unavailable', () => {
+  it('throws an error if crypto is unavailable', () => {
     // @ts-ignore
     globalThis.crypto = undefined;
 
-    const spy = spyOn(Math, 'random');
-    const id = createId();
-
-    expect(spy).toHaveBeenCalled();
-    expect(id).toMatch(/^\d+-[0-9a-f]{1,8}$/);
-
-    spy.mockRestore();
+    expect(() => createId()).toThrow('Secure random source not available');
   });
 });

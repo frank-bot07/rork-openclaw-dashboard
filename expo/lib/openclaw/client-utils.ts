@@ -211,5 +211,5 @@ export function createId() {
     return `${Date.now()}-${array[0].toString(16).padStart(8, '0')}`;
   }
 
-  return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  throw new Error('Secure random source not available');
 }
