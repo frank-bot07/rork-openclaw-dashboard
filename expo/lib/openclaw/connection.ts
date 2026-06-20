@@ -165,14 +165,12 @@ function isLocalGatewayInput(value: string) {
     return false;
   }
 
-  const hostname = hostWithPort
-    .replace(/:\d+$/, '')
-    .replace(/^\[/, '')
-    .replace(/\]$/, '');
+  const hostname = hostWithPort.replace(/:\d+$/, '');
 
   return isLocalGatewayHost(hostname);
 }
 
 function isLocalGatewayHost(hostname: string) {
-  return LOCAL_GATEWAY_PATTERNS.some((pattern) => pattern.test(hostname));
+  const normalizedHostname = hostname.replace(/^\[|\]$/g, '');
+  return LOCAL_GATEWAY_PATTERNS.some((pattern) => pattern.test(normalizedHostname));
 }
