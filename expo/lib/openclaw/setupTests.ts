@@ -1,4 +1,5 @@
 import { mock } from "bun:test";
+import type { StateCreator } from "zustand";
 
 mock("@react-native-async-storage/async-storage", () => ({
   default: {
@@ -20,8 +21,12 @@ mock("react-native", () => ({
 }));
 
 mock("zustand", () => ({
-  create: (fn: any) => {
-    const state = fn(() => {}, () => ({}));
+  create: <T>(fn: StateCreator<T>) => {
+    const state = fn(
+      (() => {}) as unknown as any,
+      (() => ({})) as unknown as any,
+      {} as any
+    );
     return () => state;
   },
 }));
