@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { OpenClawClient, OpenClawClientError } from '@/lib/openclaw/client';
+import { createId } from '@/lib/openclaw/client-utils';
 import { mapConversation, mapConversationMessage } from '@/lib/openclaw/mappers';
 import { queryKeys } from '@/lib/openclaw/queryKeys';
 import { safeInvalidateQueries } from '@/lib/openclaw/queryUtils';
@@ -128,7 +129,7 @@ export function useSendMessage(client: OpenClawClient | null) {
     onMutate: async (variables) => {
       const normalizedContent = normalizeOutgoingMessageContent(variables.content);
       const conversationKey = queryKeys.conversations.byAgent(variables.agentId);
-      const mutationId = createMutationId();
+      const mutationId = createId();
       const optimisticTimestamp = new Date().toISOString();
 
       variables.content = normalizedContent;
@@ -209,10 +210,6 @@ export function useSendMessage(client: OpenClawClient | null) {
       );
     },
   });
-}
-
-function createMutationId() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function normalizeOutgoingMessageContent(content: string) {
